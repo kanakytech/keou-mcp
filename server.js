@@ -52,11 +52,13 @@ async function saveConfig(patch) {
   CFG = loadConfig();
 }
 
-// ─── Affiliate links — REPLACE WITH REAL REFERRAL URLS ──────────────────────
-// TODO Kevyn: email kie.ai + fal.ai partnerships, get referral URLs, paste here.
-const SIGNUP_KIE  = 'https://kie.ai';        // ?ref=YOUR_CODE
-const SIGNUP_FAL  = 'https://fal.ai';        // ?ref=YOUR_CODE
-const SIGNUP_KEOU = 'https://keou.systems/pro';
+// ─── Provider signup URLs ──────────────────────────────────────────────────
+// Plain URLs — partner referral params can be appended via env override
+// (KIE_SIGNUP_URL / FAL_SIGNUP_URL) so contributors don't have to fork to
+// monetize their own deployments.
+const SIGNUP_KIE  = process.env.KIE_SIGNUP_URL  || 'https://kie.ai';
+const SIGNUP_FAL  = process.env.FAL_SIGNUP_URL  || 'https://fal.ai';
+const SIGNUP_KEOU = process.env.KEOU_SIGNUP_URL || 'https://keou.systems/pro';
 
 // ─── KIE.AI provider ────────────────────────────────────────────────────────
 // Submit:  POST https://api.kie.ai/api/v1/jobs/createTask
@@ -108,6 +110,47 @@ async function kieStatus(taskId) {
     error: failed ? (d.failMsg || d.failCode) : null,
     creditsConsumed: d.creditsConsumed,
     progress: d.progress,
+  };
+}
+
+// KIE.AI Veo3 video — separate endpoint family
+//   Submit: POST /api/v1/veo/generate     body: { prompt, model, aspect_ratio, image_url? }
+//   Status: GET  /api/v1/veo/record-info?taskId=...
+//   Status codes: 0 generating · 1 success · 2/3 failed
+async function kieVeoSubmit({ prompt, model = 'veo3_fast', aspectRatio = '16:9', imageUrl }) {
+  if (!CFG.kieKey) throw new Error('KIE_API_KEY not set — run keou_setup or visit ' + SIGNUP_KIE);
+  const body = { prompt, model, aspect_ratio: aspectRatio };
+  if (imageUrl) body.image_url = imageUrl;
+  const res = await fetch(`${KIE_BASE}/api/v1/veo/generate`, {
+    method: 'POST',
+    headers: { 'authorization': `Bearer ${CFG.kieKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json?.code !== 200) {
+    throw new Error(`KIE.AI Veo ${res.status}: ${json?.msg || 'submit failed'}`);
+  }
+  return { provider: 'kie-veo', taskId: json.data?.taskId, model };
+}
+
+async function kieVeoStatus(taskId) {
+  if (!CFG.kieKey) throw new Error('KIE_API_KEY not set');
+  const res = await fetch(`${KIE_BASE}/api/v1/veo/record-info?taskId=${encodeURIComponent(taskId)}`, {
+    headers: { 'authorization': `Bearer ${CFG.kieKey}` },
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json?.code !== 200) throw new Error(`KIE.AI Veo ${res.status}: ${json?.msg || 'status failed'}`);
+  const d = json.data || {};
+  const flag = d.successFlag;
+  const ready = flag === 1;
+  const failed = flag === 2 || flag === 3;
+  const resultUrls = ready ? (d.response?.resultUrls || []) : [];
+  return {
+    provider: 'kie-veo', taskId,
+    state: ready ? 'success' : failed ? 'fail' : 'generating',
+    ready, failed, resultUrls,
+    error: failed ? (d.errorMessage || d.errorCode) : null,
+    fallbackUsed: d.fallbackFlag,
   };
 }
 
@@ -172,15 +215,18 @@ function pickProvider(preferred) {
   throw new Error(`No provider configured. Run keou_setup, or sign up at ${SIGNUP_KIE} (cheapest) or ${SIGNUP_FAL}.`);
 }
 
+// Model IDs verified against docs.kie.ai / fal.ai (May 2026).
 const KIE_DEFAULTS = {
-  image: 'google/nano-banana',           // ~$0.04 per image
+  image: 'google/nano-banana',           // ~$0.04 per image, fast
   imagePro: 'google/nano-banana-pro',    // ~$0.10 per image, 4K
-  video: 'google/veo3-fast',             // confirm in your KIE dashboard
+  video: 'veo3_fast',                    // Veo 3.1 Fast (separate /api/v1/veo endpoint)
+  videoPro: 'veo3',                      // Veo 3.1 Quality
 };
 const FAL_DEFAULTS = {
   image: 'fal-ai/flux/schnell',          // fast + cheap
   imagePro: 'fal-ai/flux-pro',           // premium quality
   edit: 'fal-ai/flux/dev/image-to-image',
+  upscale: 'fal-ai/clarity-upscaler',
 };
 
 // ─── Tool definitions ───────────────────────────────────────────────────────
@@ -213,15 +259,15 @@ const TOOLS = [
   },
   {
     name: 'keou_generate_video',
-    description: 'Generate a short video from a prompt (and optional source image). Uses KIE.AI Veo by default. More expensive than images.',
+    description: 'Generate a short video from a prompt (and optional source image). Uses KIE.AI Veo 3.1. After submit, poll keou_get_status with provider="kie-veo".',
     inputSchema: {
       type: 'object',
       required: ['prompt'],
       properties: {
         prompt: { type: 'string' },
-        sourceImageUrl: { type: 'string' },
-        aspectRatio: { type: 'string', enum: ['16:9', '9:16', '1:1'] },
-        duration: { type: 'integer', description: 'Seconds (5-10 typical)' },
+        sourceImageUrl: { type: 'string', description: 'Optional source image for image-to-video.' },
+        aspectRatio: { type: 'string', enum: ['16:9', '9:16'], description: 'Default 16:9.' },
+        quality: { type: 'string', enum: ['fast', 'pro'], description: 'fast = veo3_fast (default), pro = veo3 (Quality)' },
       },
     },
   },
@@ -241,7 +287,7 @@ const TOOLS = [
   },
   {
     name: 'keou_upscale_image',
-    description: 'Upscale an image to higher resolution. Uses FAL.AI clarity upscaler if FAL_API_KEY set, falls back to KIE.',
+    description: 'Upscale an image (FAL.AI clarity-upscaler). Requires FAL_API_KEY.',
     inputSchema: {
       type: 'object',
       required: ['imageUrl'],
@@ -253,13 +299,13 @@ const TOOLS = [
   },
   {
     name: 'keou_get_status',
-    description: 'Poll a generation task. Returns { ready, state, resultUrls[], error }. Pass the taskId AND provider returned by any keou_generate_* call. Or pass {model} for FAL (required to build the status URL).',
+    description: 'Poll a generation task. Returns { ready, state, resultUrls[], error }. Pass back the EXACT taskId and provider returned by the submit call. For FAL also pass the same model string.',
     inputSchema: {
       type: 'object',
       required: ['taskId', 'provider'],
       properties: {
         taskId: { type: 'string' },
-        provider: { type: 'string', enum: ['kie', 'fal'] },
+        provider: { type: 'string', enum: ['kie', 'kie-veo', 'fal'] },
         model: { type: 'string', description: 'Required for FAL provider (e.g. fal-ai/flux/schnell)' },
       },
     },
@@ -354,11 +400,10 @@ const HANDLERS = {
     return falSubmit({ model, input });
   },
 
-  keou_generate_video: async ({ prompt, sourceImageUrl, aspectRatio = '16:9', duration = 5 }) => {
+  keou_generate_video: async ({ prompt, sourceImageUrl, aspectRatio = '16:9', quality = 'fast' }) => {
     if (!CFG.kieKey) throw new Error(`Video requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
-    const input = { prompt, aspect_ratio: aspectRatio, duration };
-    if (sourceImageUrl) input.image_url = sourceImageUrl;
-    return kieSubmit({ model: KIE_DEFAULTS.video, input });
+    const model = quality === 'pro' ? KIE_DEFAULTS.videoPro : KIE_DEFAULTS.video;
+    return kieVeoSubmit({ prompt, model, aspectRatio, imageUrl: sourceImageUrl });
   },
 
   keou_remix_image: async ({ imageUrl, prompt, aspectRatio, provider = 'auto' }) => {
@@ -366,22 +411,20 @@ const HANDLERS = {
   },
 
   keou_upscale_image: async ({ imageUrl, scale = 2 }) => {
-    if (CFG.falKey) {
-      return falSubmit({ model: 'fal-ai/clarity-upscaler', input: { image_url: imageUrl, upscale_factor: scale } });
+    if (!CFG.falKey) {
+      throw new Error(`Upscale runs on FAL.AI (clarity-upscaler). Set FAL_API_KEY — sign up at ${SIGNUP_FAL}.`);
     }
-    if (CFG.kieKey) {
-      return kieSubmit({ model: 'kie/upscale', input: { image_url: imageUrl, scale } });
-    }
-    throw new Error(`Upscale needs FAL or KIE key. Sign up: ${SIGNUP_FAL} or ${SIGNUP_KIE}`);
+    return falSubmit({ model: FAL_DEFAULTS.upscale, input: { image_url: imageUrl, upscale_factor: scale } });
   },
 
   keou_get_status: async ({ taskId, provider, model }) => {
     if (provider === 'kie') return kieStatus(taskId);
+    if (provider === 'kie-veo') return kieVeoStatus(taskId);
     if (provider === 'fal') {
       if (!model) throw new Error('FAL provider requires the same `model` you used at submit (e.g. fal-ai/flux/schnell).');
       return falStatus(model, taskId);
     }
-    throw new Error('provider must be "kie" or "fal"');
+    throw new Error('provider must be "kie", "kie-veo", or "fal"');
   },
 
   // ─── PREMIUM stubs (funnel) ─────────────────────────────────────────────
@@ -415,7 +458,7 @@ const HANDLERS = {
 // ─── MCP wiring ─────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: 'keou-mcp', version: '0.2.0' },
+  { name: 'keou-mcp', version: '0.2.1' },
   { capabilities: { tools: {} } }
 );
 
@@ -441,4 +484,4 @@ const have = [];
 if (CFG.kieKey) have.push('KIE');
 if (CFG.falKey) have.push('FAL');
 if (CFG.keouKey) have.push('Keou Pro');
-process.stderr.write(`[keou-mcp v0.2] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
+process.stderr.write(`[keou-mcp v0.2.1] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
