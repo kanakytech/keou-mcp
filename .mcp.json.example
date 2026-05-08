@@ -4,8 +4,9 @@
       "command": "node",
       "args": ["/ABSOLUTE/PATH/TO/keou-mcp/server.js"],
       "env": {
-        "KEOU_API_URL": "https://your-agency.keou.systems",
-        "KEOU_API_KEY": "keou_REPLACE_ME"
+        "KIE_API_KEY": "your-kie-key-from-https://kie.ai",
+        "FAL_API_KEY": "your-fal-key-from-https://fal.ai-(optional)",
+        "KEOU_API_KEY": "keou_REPLACE_ME-(optional,unlocks-premium-tools)"
       }
     }
   }

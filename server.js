@@ -1,15 +1,22 @@
 #!/usr/bin/env node
 /**
- * Keou MCP — exposes the Keou Agency generation API to any MCP client
- * (Claude Code / Desktop). Stdio transport, single-user (one API key per server).
+ * Keou MCP — open-source bridge between Claude (Code/Desktop) and the best
+ * AI image/video providers (KIE.AI, FAL.AI). Bring Your Own Key.
  *
- * Config via env:
- *   KEOU_API_URL  — base URL (default: https://keou-agency.up.railway.app)
- *   KEOU_API_KEY  — required, format keou_<32 hex>
+ * Free tier   : 6 tools (BYOK direct to providers)
+ * Premium tier: keou_pack, keou_brand_kit (require Keou Pro account)
+ *
+ * Config: env vars in .mcp.json, or fallback ~/.keou-mcp/config.json
+ *   KIE_API_KEY        — sign up at https://kie.ai
+ *   FAL_API_KEY        — sign up at https://fal.ai
+ *   KEOU_API_KEY       — optional, unlocks premium tools (https://keou.systems/pro)
+ *   KEOU_API_URL       — optional, default https://keou-agency.up.railway.app
  */
 
-import { readFile } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, basename } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -17,216 +24,398 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
-const API_URL = (process.env.KEOU_API_URL || 'https://keou-agency.up.railway.app').replace(/\/$/, '');
-const API_KEY = process.env.KEOU_API_KEY;
+// ─── Config loading ─────────────────────────────────────────────────────────
+// Priority: env vars > ~/.keou-mcp/config.json > undefined
 
-if (!API_KEY) {
-  process.stderr.write('[keou-mcp] KEOU_API_KEY missing — set it in your MCP config env block.\n');
-  process.exit(1);
-}
-if (!API_KEY.startsWith('keou_')) {
-  process.stderr.write('[keou-mcp] KEOU_API_KEY format invalid — expected "keou_<32 hex>".\n');
-  process.exit(1);
-}
+const CONFIG_DIR = join(homedir(), '.keou-mcp');
+const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
 
-// ─── HTTP helpers ───────────────────────────────────────────────────────────
-
-async function api(method, path, body) {
-  const res = await fetch(`${API_URL}${path}`, {
-    method,
-    headers: {
-      'authorization': `Bearer ${API_KEY}`,
-      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let json;
-  try { json = text ? JSON.parse(text) : {}; }
-  catch { json = { raw: text }; }
-  if (!res.ok) {
-    const msg = json?.error || `HTTP ${res.status}`;
-    const err = new Error(`[${method} ${path}] ${msg}`);
-    err.status = res.status;
-    err.body = json;
-    throw err;
+function loadConfig() {
+  let fileCfg = {};
+  if (existsSync(CONFIG_PATH)) {
+    try { fileCfg = JSON.parse(readFileSync(CONFIG_PATH, 'utf8')); }
+    catch (e) { process.stderr.write(`[keou-mcp] warn: config.json unreadable (${e.message})\n`); }
   }
-  return json;
+  return {
+    kieKey:  process.env.KIE_API_KEY  || fileCfg.kieKey  || null,
+    falKey:  process.env.FAL_API_KEY  || fileCfg.falKey  || null,
+    keouKey: process.env.KEOU_API_KEY || fileCfg.keouKey || null,
+    keouUrl: (process.env.KEOU_API_URL || fileCfg.keouUrl || 'https://keou-agency.up.railway.app').replace(/\/$/, ''),
+  };
+}
+let CFG = loadConfig();
+
+async function saveConfig(patch) {
+  if (!existsSync(CONFIG_DIR)) await mkdir(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  const merged = { ...CFG, ...patch };
+  await writeFile(CONFIG_PATH, JSON.stringify(merged, null, 2), { mode: 0o600 });
+  CFG = loadConfig();
 }
 
-async function uploadFile(filePath) {
-  const buf = await readFile(filePath);
-  const name = basename(filePath);
-  const ext = name.split('.').pop()?.toLowerCase() || 'png';
-  const mimes = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
-  const type = mimes[ext];
-  if (!type) throw new Error(`Unsupported image type ".${ext}" — use jpg/png/webp/gif.`);
+// ─── Affiliate links — REPLACE WITH REAL REFERRAL URLS ──────────────────────
+// TODO Kevyn: email kie.ai + fal.ai partnerships, get referral URLs, paste here.
+const SIGNUP_KIE  = 'https://kie.ai';        // ?ref=YOUR_CODE
+const SIGNUP_FAL  = 'https://fal.ai';        // ?ref=YOUR_CODE
+const SIGNUP_KEOU = 'https://keou.systems/pro';
 
-  const form = new FormData();
-  form.append('image', new Blob([buf], { type }), name);
+// ─── KIE.AI provider ────────────────────────────────────────────────────────
+// Submit:  POST https://api.kie.ai/api/v1/jobs/createTask
+// Status:  GET  https://api.kie.ai/api/v1/jobs/recordInfo?taskId=...
+// Models:  google/nano-banana (cheap fast), google/nano-banana-pro (4K), nano-banana-2
 
-  const res = await fetch(`${API_URL}/api/upload`, {
+const KIE_BASE = 'https://api.kie.ai';
+
+async function kieSubmit({ model, input }) {
+  if (!CFG.kieKey) throw new Error('KIE_API_KEY not set — run keou_setup or visit ' + SIGNUP_KIE);
+  const res = await fetch(`${KIE_BASE}/api/v1/jobs/createTask`, {
     method: 'POST',
-    headers: { 'authorization': `Bearer ${API_KEY}` },
-    body: form,
+    headers: {
+      'authorization': `Bearer ${CFG.kieKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ model, input }),
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json?.error || `Upload failed (HTTP ${res.status})`);
-  return json.url;
+  if (!res.ok || json?.code !== 200) {
+    throw new Error(`KIE.AI ${res.status}: ${json?.msg || json?.message || 'submit failed'}`);
+  }
+  return { provider: 'kie', taskId: json.data?.taskId, model };
 }
+
+async function kieStatus(taskId) {
+  if (!CFG.kieKey) throw new Error('KIE_API_KEY not set');
+  const res = await fetch(`${KIE_BASE}/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`, {
+    headers: { 'authorization': `Bearer ${CFG.kieKey}` },
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json?.code !== 200) {
+    throw new Error(`KIE.AI ${res.status}: ${json?.msg || 'status failed'}`);
+  }
+  const d = json.data || {};
+  const ready = d.state === 'success';
+  const failed = d.state === 'fail';
+  let resultUrls = [];
+  if (ready && d.resultJson) {
+    try {
+      const parsed = JSON.parse(d.resultJson);
+      resultUrls = parsed?.resultUrls || parsed?.urls || (parsed?.url ? [parsed.url] : []);
+    } catch { /* leave empty */ }
+  }
+  return {
+    provider: 'kie', taskId, state: d.state,
+    ready, failed,
+    resultUrls,
+    error: failed ? (d.failMsg || d.failCode) : null,
+    creditsConsumed: d.creditsConsumed,
+    progress: d.progress,
+  };
+}
+
+// ─── FAL.AI provider ────────────────────────────────────────────────────────
+// Submit:  POST https://queue.fal.run/<model-id>
+// Status:  GET  https://queue.fal.run/<model-id>/requests/<id>/status
+// Result:  GET  https://queue.fal.run/<model-id>/requests/<id>
+
+const FAL_BASE = 'https://queue.fal.run';
+
+async function falSubmit({ model, input }) {
+  if (!CFG.falKey) throw new Error('FAL_API_KEY not set — run keou_setup or visit ' + SIGNUP_FAL);
+  const res = await fetch(`${FAL_BASE}/${model}`, {
+    method: 'POST',
+    headers: {
+      'authorization': `Key ${CFG.falKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`FAL.AI ${res.status}: ${json?.detail || json?.error || 'submit failed'}`);
+  return { provider: 'fal', taskId: json.request_id, model, statusUrl: json.status_url, responseUrl: json.response_url };
+}
+
+async function falStatus(model, requestId) {
+  if (!CFG.falKey) throw new Error('FAL_API_KEY not set');
+  const sRes = await fetch(`${FAL_BASE}/${model}/requests/${requestId}/status`, {
+    headers: { 'authorization': `Key ${CFG.falKey}` },
+  });
+  const sJson = await sRes.json().catch(() => ({}));
+  const ready = sJson.status === 'COMPLETED';
+  const failed = sJson.status === 'FAILED' || sJson.status === 'CANCELLED';
+
+  let resultUrls = [];
+  if (ready) {
+    const rRes = await fetch(`${FAL_BASE}/${model}/requests/${requestId}`, {
+      headers: { 'authorization': `Key ${CFG.falKey}` },
+    });
+    const rJson = await rRes.json().catch(() => ({}));
+    resultUrls = (rJson.images || []).map(i => i.url);
+    if (rJson.video?.url) resultUrls.push(rJson.video.url);
+  }
+  return {
+    provider: 'fal', taskId: requestId, state: sJson.status,
+    ready, failed,
+    resultUrls,
+    error: failed ? (sJson.error || 'failed') : null,
+  };
+}
+
+// ─── Smart routing ──────────────────────────────────────────────────────────
+
+function pickProvider(preferred) {
+  if (preferred === 'kie' && CFG.kieKey) return 'kie';
+  if (preferred === 'fal' && CFG.falKey) return 'fal';
+  if (preferred === 'kie' && !CFG.kieKey) throw new Error(`KIE selected but KIE_API_KEY missing — sign up at ${SIGNUP_KIE}`);
+  if (preferred === 'fal' && !CFG.falKey) throw new Error(`FAL selected but FAL_API_KEY missing — sign up at ${SIGNUP_FAL}`);
+  // auto: prefer KIE (cheaper)
+  if (CFG.kieKey) return 'kie';
+  if (CFG.falKey) return 'fal';
+  throw new Error(`No provider configured. Run keou_setup, or sign up at ${SIGNUP_KIE} (cheapest) or ${SIGNUP_FAL}.`);
+}
+
+const KIE_DEFAULTS = {
+  image: 'google/nano-banana',           // ~$0.04 per image
+  imagePro: 'google/nano-banana-pro',    // ~$0.10 per image, 4K
+  video: 'google/veo3-fast',             // confirm in your KIE dashboard
+};
+const FAL_DEFAULTS = {
+  image: 'fal-ai/flux/schnell',          // fast + cheap
+  imagePro: 'fal-ai/flux-pro',           // premium quality
+  edit: 'fal-ai/flux/dev/image-to-image',
+};
 
 // ─── Tool definitions ───────────────────────────────────────────────────────
 
 const TOOLS = [
   {
-    name: 'keou_upload_image',
-    description: 'Upload a local image file (jpg/png/webp/gif, max 20MB) to Keou storage. Returns a URL usable by all generate_* tools. Use this when the user references a file path on disk.',
-    inputSchema: {
-      type: 'object',
-      required: ['filePath'],
-      properties: {
-        filePath: { type: 'string', description: 'Absolute local file path' },
-      },
-    },
+    name: 'keou_setup',
+    description: 'First-run wizard. Returns links to sign up for KIE.AI / FAL.AI (the providers that actually generate the visuals) and instructions for pasting your API key. Run this if any other tool returns "API key not set".',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'keou_status_keys',
+    description: 'Show which provider keys are currently configured (without revealing the keys themselves) and which features are unlocked.',
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'keou_generate_image',
-    description: 'Generate one product image variant from a source image URL. Use the format param to pick a creative angle (e.g. "lifestyle", "studio", "social"). Returns a generationId — poll keou_get_status to retrieve the result.',
+    description: 'Generate an image from a text prompt (and optional source image). Routes to KIE.AI by default (cheapest, ~$0.04/img) or FAL.AI if explicitly chosen. Returns a taskId — poll keou_get_status to retrieve the result URL.',
     inputSchema: {
       type: 'object',
-      required: ['imgUrl'],
+      required: ['prompt'],
       properties: {
-        imgUrl: { type: 'string', description: 'Source image URL (from keou_upload_image or any public URL)' },
-        format: { type: 'string', description: 'Format preset key (optional, server-defined)' },
-        creativeDirection: { type: 'string', description: 'Free-form creative brief (optional)' },
-        projectId: { type: 'integer', description: 'Project to attach the result to (optional)' },
-        campaignId: { type: 'integer', description: 'Campaign to attach the result to (optional)' },
+        prompt: { type: 'string', description: 'What to generate. Be specific about subject, lighting, style.' },
+        sourceImageUrl: { type: 'string', description: 'Optional source image URL for image-to-image / reference.' },
+        aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'], description: 'Default 1:1' },
+        quality: { type: 'string', enum: ['fast', 'pro'], description: 'fast = cheap & quick (default), pro = 4K hi-fi' },
+        provider: { type: 'string', enum: ['auto', 'kie', 'fal'], description: 'Default auto (KIE preferred for cost).' },
       },
     },
   },
   {
     name: 'keou_generate_video',
-    description: 'Generate a video from an image URL. Returns a generationId — poll keou_get_status with type="video".',
+    description: 'Generate a short video from a prompt (and optional source image). Uses KIE.AI Veo by default. More expensive than images.',
+    inputSchema: {
+      type: 'object',
+      required: ['prompt'],
+      properties: {
+        prompt: { type: 'string' },
+        sourceImageUrl: { type: 'string' },
+        aspectRatio: { type: 'string', enum: ['16:9', '9:16', '1:1'] },
+        duration: { type: 'integer', description: 'Seconds (5-10 typical)' },
+      },
+    },
+  },
+  {
+    name: 'keou_remix_image',
+    description: 'Re-imagine an existing image with a new prompt (image-to-image). Keeps composition, swaps style/subject as directed.',
+    inputSchema: {
+      type: 'object',
+      required: ['imageUrl', 'prompt'],
+      properties: {
+        imageUrl: { type: 'string' },
+        prompt: { type: 'string', description: 'How to remix the image.' },
+        aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9'] },
+        provider: { type: 'string', enum: ['auto', 'kie', 'fal'] },
+      },
+    },
+  },
+  {
+    name: 'keou_upscale_image',
+    description: 'Upscale an image to higher resolution. Uses FAL.AI clarity upscaler if FAL_API_KEY set, falls back to KIE.',
     inputSchema: {
       type: 'object',
       required: ['imageUrl'],
       properties: {
         imageUrl: { type: 'string' },
-        creativeDirection: { type: 'string' },
-        videoModel: { type: 'string' },
-        duration: { type: 'integer' },
-        resolution: { type: 'string' },
-        aspectRatio: { type: 'string' },
-        projectId: { type: 'integer' },
-        campaignId: { type: 'integer' },
-      },
-    },
-  },
-  {
-    name: 'keou_polish',
-    description: 'Polish/retouch an existing image (cleanup, lighting, sharpening). Returns a new generationId.',
-    inputSchema: {
-      type: 'object',
-      required: ['imageUrl'],
-      properties: {
-        imageUrl: { type: 'string' },
-        ratio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9'] },
-        projectId: { type: 'integer' },
-      },
-    },
-  },
-  {
-    name: 'keou_remix',
-    description: 'Remix an image with a custom prompt (re-imagine the scene). Returns a new generationId.',
-    inputSchema: {
-      type: 'object',
-      required: ['imageUrl', 'remixPrompt'],
-      properties: {
-        imageUrl: { type: 'string' },
-        remixPrompt: { type: 'string', description: 'Free-form prompt describing the remix' },
-        ratio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9'] },
-        projectId: { type: 'integer' },
-      },
-    },
-  },
-  {
-    name: 'keou_list_packs',
-    description: 'List the available export pack presets (each pack is a set of N format variants generated in parallel from one source image).',
-    inputSchema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'keou_generate_pack',
-    description: 'Fan out one completed source image into N format variants in parallel. Use this for "give me 30 visuals from this image" workflows. Requires a sourceGenerationId that is already completed (run keou_generate_image first, then keou_get_status until ready). Returns a packId — poll keou_get_pack_status.',
-    inputSchema: {
-      type: 'object',
-      required: ['sourceGenerationId', 'packId'],
-      properties: {
-        sourceGenerationId: { type: 'integer', description: 'ID of a completed source generation' },
-        packId: { type: 'string', description: 'Pack preset id from keou_list_packs' },
-        projectId: { type: 'integer' },
-        campaignId: { type: 'integer' },
+        scale: { type: 'integer', enum: [2, 4], description: 'Default 2x' },
       },
     },
   },
   {
     name: 'keou_get_status',
-    description: 'Poll the status of a single generation. Returns { ready, state, resultUrl?, error? }. Use when generationId/taskId came from generate_image, generate_video, polish, remix.',
+    description: 'Poll a generation task. Returns { ready, state, resultUrls[], error }. Pass the taskId AND provider returned by any keou_generate_* call. Or pass {model} for FAL (required to build the status URL).',
     inputSchema: {
       type: 'object',
-      required: ['type', 'taskId'],
+      required: ['taskId', 'provider'],
       properties: {
-        type: { type: 'string', description: 'image | video | polish | remix | adapt' },
         taskId: { type: 'string' },
-        generationId: { type: 'integer', description: 'Strongly recommended — enables DB fast path' },
-        recordId: { type: 'string' },
+        provider: { type: 'string', enum: ['kie', 'fal'] },
+        model: { type: 'string', description: 'Required for FAL provider (e.g. fal-ai/flux/schnell)' },
+      },
+    },
+  },
+
+  // ─── PREMIUM (Keou Pro) — funnel toward https://keou.systems/pro ────────
+  {
+    name: 'keou_pack_30_variants',
+    description: 'PREMIUM. Fan one source image into 30 format-perfect variants in parallel (Instagram square, story, reel, TikTok, ad creative, banners, etc.) — what would take 25 hours by hand. Requires a Keou Pro account ($19/mo, 15 free generations to start). Run this tool to learn more.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sourceImageUrl: { type: 'string' },
+        packType: { type: 'string', enum: ['lifestyle', 'studio', 'social', 'ads'] },
       },
     },
   },
   {
-    name: 'keou_get_pack_status',
-    description: 'Poll the status of an export pack. Returns aggregate progress { total, ready, failed, done } plus per-item URLs as they complete.',
+    name: 'keou_brand_kit_apply',
+    description: 'PREMIUM. Apply your brand colors, fonts, logo placement, and style across all generations automatically. Requires Keou Pro.',
     inputSchema: {
       type: 'object',
-      required: ['packId'],
-      properties: { packId: { type: 'string' } },
+      properties: { brandKitId: { type: 'string' } },
     },
-  },
-  {
-    name: 'keou_list_projects',
-    description: 'List the user\'s projects (id, name, status). Use to resolve a project name into projectId before calling generate_*.',
-    inputSchema: { type: 'object', properties: {} },
   },
 ];
 
-// ─── Tool dispatch ──────────────────────────────────────────────────────────
+// ─── Tool implementations ───────────────────────────────────────────────────
 
 const HANDLERS = {
-  keou_upload_image: async ({ filePath }) => ({ url: await uploadFile(filePath) }),
-
-  keou_generate_image: (args) => api('POST', '/api/generate', args),
-  keou_generate_video: (args) => api('POST', '/api/video', args),
-  keou_polish: (args) => api('POST', '/api/polish', args),
-  keou_remix: (args) => api('POST', '/api/remix', args),
-
-  keou_list_packs: () => api('GET', '/api/packs'),
-  keou_generate_pack: (args) => api('POST', '/api/pack', args),
-
-  keou_get_status: ({ type, taskId, generationId, recordId }) => {
-    const qs = new URLSearchParams();
-    if (generationId) qs.set('generationId', String(generationId));
-    if (recordId) qs.set('recordId', recordId);
-    const q = qs.toString();
-    return api('GET', `/api/status/${encodeURIComponent(type)}/${encodeURIComponent(taskId)}${q ? '?' + q : ''}`);
+  keou_setup: async () => {
+    const have = {
+      kie: !!CFG.kieKey,
+      fal: !!CFG.falKey,
+      keouPro: !!CFG.keouKey,
+    };
+    return {
+      welcome: 'Keou MCP — generate images & videos from any Claude chat.',
+      currentStatus: have,
+      howToConfigure: {
+        option1_envVars: 'Edit your .mcp.json and add an "env" block with KIE_API_KEY and/or FAL_API_KEY. Restart Claude.',
+        option2_configFile: `Create ${CONFIG_PATH} with { "kieKey": "...", "falKey": "..." }`,
+      },
+      providers: {
+        kie: {
+          why: 'Cheapest provider (~$0.04/image with nano-banana). Fast. Good for batch.',
+          signup: SIGNUP_KIE,
+          freeCredits: 'Yes, on signup',
+        },
+        fal: {
+          why: 'Premium quality (Flux models). More expensive (~$0.10/image) but state-of-the-art.',
+          signup: SIGNUP_FAL,
+          freeCredits: 'Yes, on signup',
+        },
+      },
+      premiumUpgrade: {
+        what: 'Keou Pro: batch packs (30 variants from 1 source), brand kit, history, team sharing',
+        signup: SIGNUP_KEOU,
+        pricing: '$19/mo — 15 free generations to start',
+      },
+    };
   },
-  keou_get_pack_status: ({ packId }) => api('GET', `/api/pack/${encodeURIComponent(packId)}/status`),
 
-  keou_list_projects: () => api('GET', '/api/projects'),
+  keou_status_keys: async () => ({
+    kie:  CFG.kieKey  ? `configured (${CFG.kieKey.slice(0, 6)}…)` : 'not set',
+    fal:  CFG.falKey  ? `configured (${CFG.falKey.slice(0, 6)}…)` : 'not set',
+    keouPro: CFG.keouKey ? `configured (${CFG.keouKey.slice(0, 10)}…)` : 'not set — premium tools locked',
+    unlockedTools: [
+      ...(CFG.kieKey || CFG.falKey ? ['keou_generate_image', 'keou_generate_video', 'keou_remix_image', 'keou_upscale_image', 'keou_get_status'] : []),
+      ...(CFG.keouKey ? ['keou_pack_30_variants', 'keou_brand_kit_apply'] : []),
+    ],
+    suggestion: !CFG.kieKey && !CFG.falKey
+      ? `No provider key set. Run keou_setup, or sign up at ${SIGNUP_KIE} (cheapest).`
+      : !CFG.keouKey
+      ? `Pro tip: unlock batch packs (30 variants in parallel) → ${SIGNUP_KEOU}`
+      : 'All tiers unlocked.',
+  }),
+
+  keou_generate_image: async ({ prompt, sourceImageUrl, aspectRatio = '1:1', quality = 'fast', provider = 'auto' }) => {
+    const p = pickProvider(provider);
+    if (p === 'kie') {
+      const model = quality === 'pro' ? KIE_DEFAULTS.imagePro : KIE_DEFAULTS.image;
+      const input = { prompt, image_size: aspectRatio };
+      if (sourceImageUrl) input.image_urls = [sourceImageUrl];
+      return kieSubmit({ model, input });
+    }
+    // fal
+    const model = sourceImageUrl ? FAL_DEFAULTS.edit : (quality === 'pro' ? FAL_DEFAULTS.imagePro : FAL_DEFAULTS.image);
+    const sizeMap = { '1:1': 'square', '3:4': 'portrait_4_3', '4:3': 'landscape_4_3', '9:16': 'portrait_16_9', '16:9': 'landscape_16_9', '21:9': 'landscape_16_9' };
+    const input = { prompt, image_size: sizeMap[aspectRatio] || 'square' };
+    if (sourceImageUrl) input.image_url = sourceImageUrl;
+    return falSubmit({ model, input });
+  },
+
+  keou_generate_video: async ({ prompt, sourceImageUrl, aspectRatio = '16:9', duration = 5 }) => {
+    if (!CFG.kieKey) throw new Error(`Video requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+    const input = { prompt, aspect_ratio: aspectRatio, duration };
+    if (sourceImageUrl) input.image_url = sourceImageUrl;
+    return kieSubmit({ model: KIE_DEFAULTS.video, input });
+  },
+
+  keou_remix_image: async ({ imageUrl, prompt, aspectRatio, provider = 'auto' }) => {
+    return HANDLERS.keou_generate_image({ prompt, sourceImageUrl: imageUrl, aspectRatio, provider });
+  },
+
+  keou_upscale_image: async ({ imageUrl, scale = 2 }) => {
+    if (CFG.falKey) {
+      return falSubmit({ model: 'fal-ai/clarity-upscaler', input: { image_url: imageUrl, upscale_factor: scale } });
+    }
+    if (CFG.kieKey) {
+      return kieSubmit({ model: 'kie/upscale', input: { image_url: imageUrl, scale } });
+    }
+    throw new Error(`Upscale needs FAL or KIE key. Sign up: ${SIGNUP_FAL} or ${SIGNUP_KIE}`);
+  },
+
+  keou_get_status: async ({ taskId, provider, model }) => {
+    if (provider === 'kie') return kieStatus(taskId);
+    if (provider === 'fal') {
+      if (!model) throw new Error('FAL provider requires the same `model` you used at submit (e.g. fal-ai/flux/schnell).');
+      return falStatus(model, taskId);
+    }
+    throw new Error('provider must be "kie" or "fal"');
+  },
+
+  // ─── PREMIUM stubs (funnel) ─────────────────────────────────────────────
+  keou_pack_30_variants: async () => {
+    if (!CFG.keouKey) {
+      return {
+        locked: true,
+        feature: 'Pack of 30 format-perfect variants from a single source image',
+        savesYou: '~25 hours of manual editing per pack',
+        upgradeUrl: SIGNUP_KEOU,
+        pricing: '$19/mo — 15 free generations to start',
+        howToUnlock: `1. Sign up at ${SIGNUP_KEOU}\n2. Create an API key in your dashboard\n3. Add KEOU_API_KEY to your .mcp.json env block\n4. Restart Claude`,
+      };
+    }
+    // TODO Phase 2: implement real call to Keou agency /api/pack
+    return { locked: false, todo: 'Premium pack generation will call Keou agency API in Phase 2.' };
+  },
+
+  keou_brand_kit_apply: async () => {
+    if (!CFG.keouKey) {
+      return {
+        locked: true,
+        feature: 'Auto-apply your brand colors, fonts, logo across all generations',
+        upgradeUrl: SIGNUP_KEOU,
+      };
+    }
+    return { locked: false, todo: 'Brand kit will call Keou agency API in Phase 2.' };
+  },
 };
 
 // ─── MCP wiring ─────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: 'keou-mcp', version: '0.1.0' },
+  { name: 'keou-mcp', version: '0.2.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -235,22 +424,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const handler = HANDLERS[req.params.name];
   if (!handler) {
-    return {
-      isError: true,
-      content: [{ type: 'text', text: `Unknown tool: ${req.params.name}` }],
-    };
+    return { isError: true, content: [{ type: 'text', text: `Unknown tool: ${req.params.name}` }] };
   }
   try {
     const result = await handler(req.params.arguments || {});
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   } catch (e) {
-    return {
-      isError: true,
-      content: [{ type: 'text', text: e.message || 'Tool execution failed' }],
-    };
+    return { isError: true, content: [{ type: 'text', text: e.message || 'Tool execution failed' }] };
   }
 });
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-process.stderr.write(`[keou-mcp] connected — API ${API_URL}\n`);
+
+const have = [];
+if (CFG.kieKey) have.push('KIE');
+if (CFG.falKey) have.push('FAL');
+if (CFG.keouKey) have.push('Keou Pro');
+process.stderr.write(`[keou-mcp v0.2] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
