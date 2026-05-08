@@ -1,0 +1,19 @@
+{
+  "name": "keou-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Keou — generate visuals from any Claude chat",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "keou-mcp": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  }
+}
