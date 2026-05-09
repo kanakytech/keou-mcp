@@ -2,9 +2,22 @@
   "name": "keou-mcp",
   "version": "0.4.0",
   "description": "MCP server bridging Claude (Code/Desktop) to KIE.AI + FAL.AI — generate product visuals from any chat. BYOK.",
-  "keywords": ["mcp", "claude", "claude-code", "ai", "image-generation", "video-generation", "kie", "fal", "keou"],
+  "keywords": [
+    "mcp",
+    "claude",
+    "claude-code",
+    "ai",
+    "image-generation",
+    "video-generation",
+    "kie",
+    "fal",
+    "keou"
+  ],
   "homepage": "https://github.com/kanakytech/keou-mcp",
-  "repository": { "type": "git", "url": "git+https://github.com/kanakytech/keou-mcp.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kanakytech/keou-mcp.git"
+  },
   "bugs": "https://github.com/kanakytech/keou-mcp/issues",
   "license": "MIT",
   "author": "WAHUZUE Kevyn (https://github.com/kanakytech/)",

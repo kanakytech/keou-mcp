@@ -31,35 +31,45 @@ You ──► Claude ──► keou-mcp ──► KIE.AI / FAL.AI ──► desi
 
 ---
 
-## 60-second install
+## 1-click install (recommended)
+
+Visit **[keou.systems/install](https://keou.systems/install)** and click "Add to Claude". That's it.
+
+What happens:
+1. Claude Code opens with a pre-typed install prompt
+2. You press Enter
+3. Claude installs the MCP, asks you for your KIE.AI key, configures it, and runs a first test
+
+You don't run any commands yourself. You just paste your KIE.AI key when Claude asks. ~60 seconds total, zero technical knowledge needed.
+
+**Don't have Claude Code?** Same page lets you copy the install prompt into Claude Desktop or claude.ai instead.
+
+---
+
+## Manual install (if you prefer the CLI directly)
 
 ```bash
-git clone https://github.com/kanakytech/keou-mcp.git
-cd keou-mcp
-npm install
+claude mcp add keou --scope user -- npx -y github:kanakytech/keou-mcp
+claude mcp env set keou KIE_API_KEY=your-key-here
 ```
 
-Add to your Claude config:
+Restart Claude Code. Run `/mcp` — you should see 10 `keou_*` tools.
+
+For Claude Desktop, paste this into `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```json
 {
   "mcpServers": {
     "keou": {
-      "command": "node",
-      "args": ["/ABSOLUTE/PATH/TO/keou-mcp/server.js"],
-      "env": {
-        "KIE_API_KEY": "your-kie-key-here"
-      }
+      "command": "npx",
+      "args": ["-y", "github:kanakytech/keou-mcp"],
+      "env": { "KIE_API_KEY": "your-key-here" }
     }
   }
 }
 ```
 
-**Or use the 1-click installer**: visit [keou.systems/install](https://keou.systems/install) — autodetects your Claude client and gives you the exact command to copy/paste.
-
-Restart Claude. Run `/mcp` — you should see 10 `keou_*` tools. Done.
-
-> **No key yet?** Skip the env block, restart Claude, and ask: *"Run keou_setup."* The MCP walks you through it.
+> **No key yet?** Once installed, ask Claude: *"Run keou_setup."* — the MCP walks you through getting one.
 
 ---
 
