@@ -60,6 +60,77 @@ const SIGNUP_KIE  = process.env.KIE_SIGNUP_URL  || 'https://kie.ai?ref=ec0e98ef5
 const SIGNUP_FAL  = process.env.FAL_SIGNUP_URL  || 'https://fal.ai';
 const SIGNUP_KEOU = process.env.KEOU_SIGNUP_URL || 'https://keou.systems/pro';
 
+// ─── Inline rendering helpers ───────────────────────────────────────────────
+// MCP supports `image` and `audio` content blocks — base64 payload + MIME type.
+// When a tool finishes a render, we fetch the result URL and embed the bytes
+// directly so Claude renders the image inline in the chat (no link click).
+// Videos: MCP has no native `video` block, so we keep them as a clickable URL.
+
+const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']);
+const INLINE_MAX_BYTES = 8 * 1024 * 1024; // 8MB hard cap before we fall back to URL-only
+const INLINE_FETCH_TIMEOUT_MS = 30_000;
+
+function inferMimeFromUrl(url) {
+  const ext = (url.split('?')[0].split('#')[0].split('.').pop() || '').toLowerCase();
+  return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' })[ext] || null;
+}
+
+/**
+ * Fetch a URL and turn it into an MCP image content block. Returns null on
+ * any failure (non-200, non-image type, oversized, timeout) so the caller can
+ * fall back to a text-with-URL block.
+ */
+async function fetchAsImageBlock(url) {
+  if (!url) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), INLINE_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return null;
+    let mimeType = res.headers.get('content-type')?.split(';')[0]?.trim() || inferMimeFromUrl(url);
+    if (!mimeType || !INLINE_IMAGE_TYPES.has(mimeType.toLowerCase())) return null;
+    const len = parseInt(res.headers.get('content-length') || '0', 10);
+    if (len && len > INLINE_MAX_BYTES) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.byteLength > INLINE_MAX_BYTES) return null;
+    return { type: 'image', data: buf.toString('base64'), mimeType };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Build an MCP `content` array from a status payload. Inlines image URLs as
+ * image blocks; falls back to a text block listing URLs if inlining fails or
+ * the URL is a video.
+ */
+async function buildResultContent(status, { headerText } = {}) {
+  const urls = status?.resultUrls || [];
+  const blocks = [];
+  if (headerText) blocks.push({ type: 'text', text: headerText });
+
+  let inlinedCount = 0;
+  for (const url of urls) {
+    const img = await fetchAsImageBlock(url);
+    if (img) {
+      blocks.push(img);
+      inlinedCount++;
+    } else {
+      // Video / oversized / fetch failure → keep as a clickable text URL
+      blocks.push({ type: 'text', text: url });
+    }
+  }
+
+  // Append a compact metadata footer so the assistant can poll/cite later
+  const meta = { taskId: status?.taskId, provider: status?.provider, state: status?.state };
+  if (status?.error) meta.error = status.error;
+  blocks.push({ type: 'text', text: '```json\n' + JSON.stringify(meta, null, 2) + '\n```' });
+
+  return { content: blocks, _meta: { inlined: inlinedCount, totalUrls: urls.length } };
+}
+
 // ─── KIE.AI provider ────────────────────────────────────────────────────────
 // Submit:  POST https://api.kie.ai/api/v1/jobs/createTask
 // Status:  GET  https://api.kie.ai/api/v1/jobs/recordInfo?taskId=...
@@ -596,13 +667,28 @@ const HANDLERS = {
   },
 
   keou_get_status: async ({ taskId, provider, model }) => {
-    if (provider === 'kie') return kieStatus(taskId);
-    if (provider === 'kie-veo') return kieVeoStatus(taskId);
-    if (provider === 'fal') {
-      if (!model) throw new Error('FAL provider requires the same `model` you used at submit (e.g. fal-ai/flux/schnell).');
-      return falStatus(model, taskId);
+    let status;
+    if (provider === 'kie') status = await kieStatus(taskId);
+    else if (provider === 'kie-veo') status = await kieVeoStatus(taskId);
+    else if (provider === 'fal') {
+      if (!model) throw new Error('FAL provider requires the same `model` you used at submit (e.g. fal-ai/clarity-upscaler).');
+      status = await falStatus(model, taskId);
+    } else {
+      throw new Error('provider must be "kie", "kie-veo", or "fal"');
     }
-    throw new Error('provider must be "kie", "kie-veo", or "fal"');
+
+    // Still in flight or failed → return JSON status as text. Claude polls
+    // again after a short pause.
+    if (!status.ready || !status.resultUrls?.length) return status;
+
+    // Ready → fetch the result(s) and embed them inline so Claude renders
+    // the image(s) directly in the chat. Videos fall through as URL text
+    // (MCP has no native video block).
+    return buildResultContent(status, {
+      headerText: status.resultUrls.length === 1
+        ? 'Done — here\'s your result:'
+        : `Done — ${status.resultUrls.length} results:`,
+    });
   },
 
   // ─── PREMIUM (Keou Pro) ────────────────────────────────────────────────
@@ -648,7 +734,20 @@ const HANDLERS = {
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(`Keou ${res.status}: ${json?.error || 'status failed'}`);
-    return json;
+
+    // Pack still rendering → return JSON status as text. Done → inline every
+    // ready variant as an image block so Claude shows the whole grid in chat.
+    if (!json.done) return json;
+
+    const readyUrls = (json.items || [])
+      .filter(it => it.status === 'completed' && it.url)
+      .map(it => it.url);
+    if (!readyUrls.length) return json;
+
+    return buildResultContent(
+      { resultUrls: readyUrls, taskId: packId, provider: 'keou-pack', state: 'completed' },
+      { headerText: `Pack ready — ${readyUrls.length}/${json.total} variants:` }
+    );
   },
 
   keou_brand_kit_apply: async () => {
@@ -684,6 +783,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
   try {
     const result = await handler(req.params.arguments || {});
+    // Handler can return a pre-shaped MCP response with content[] (used by
+    // tools that inline images via fetchAsImageBlock). Otherwise we serialize
+    // the plain object as JSON in a text block.
+    if (result && Array.isArray(result.content)) return result;
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   } catch (e) {
     return { isError: true, content: [{ type: 'text', text: e.message || 'Tool execution failed' }] };
@@ -697,4 +800,4 @@ const have = [];
 if (CFG.kieKey) have.push('KIE');
 if (CFG.falKey) have.push('FAL');
 if (CFG.keouKey) have.push('Keou Pro');
-process.stderr.write(`[keou-mcp v0.5.1] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
+process.stderr.write(`[keou-mcp v0.6.0] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);

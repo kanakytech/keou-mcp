@@ -5,6 +5,26 @@ All notable changes to keou-mcp documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-05-09
+
+### Added
+- Inline image rendering — `keou_get_status` and `keou_pack_status` now
+  fetch result URLs and embed them as MCP `image` content blocks (base64 +
+  mimeType), so Claude renders the image directly in the chat instead of
+  showing a clickable link. Pack status renders the entire grid of variants
+  inline at once.
+- New helper `fetchAsImageBlock(url)` — graceful fallback to URL text on
+  oversized payloads (>8MB), wrong content type, non-2xx responses, or
+  network timeouts.
+- Tool handlers can now return a pre-shaped `{ content: [...] }` MCP
+  response, bypassing the default JSON-text serialization.
+
+### Notes
+- Videos (Veo 3.1) keep the URL-text path — MCP has no native `video`
+  content block type. The URL is still clickable in Claude.
+- In-flight statuses (`ready: false`) still return JSON status as text so
+  the assistant can poll again.
+
 ## [0.5.1] — 2026-05-09
 
 ### Fixed
