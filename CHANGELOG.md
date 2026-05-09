@@ -5,6 +5,35 @@ All notable changes to keou-mcp documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-05-09
+
+### Changed (BREAKING for tool inputs)
+- `keou_generate_image` now uses `nano-banana-pro` exclusively — Keou's
+  production image-gen model. Removed the `quality: "fast" | "pro"` param;
+  added `resolution: "2K" | "4K"` instead (default 2K). Removed the
+  `provider` param — image gen is always KIE.AI now.
+- `keou_remix_image` switched to `flux-2/pro-image-to-image` (Keou's
+  production remix model). Same input shape as before.
+- All KIE.AI image tools now use the request body shape Keou uses in prod
+  (the `nano-banana-pro` family wants `input` as a JSON-stringified object).
+
+### Added
+- `keou_welcome` — structured post-install guide (example prompts, key
+  concepts, pro tips, costs, upgrade paths). Called automatically by the
+  install prompt after the first test image lands. Apple-style: tells the
+  assistant to pick ONE example and offer to run it, not dump the whole
+  guide.
+- `keou_polish_image` — clean up imperfections, enhance lighting, sharpen
+  detail, remove background noise. Preserves subject + composition. Uses
+  `flux-2/pro-image-to-image` with a polish-tuned prompt.
+- `keou_adapt_image` — re-render an existing image in a new aspect ratio
+  (1:1 → 9:16 → 16:9 etc) while keeping subject and style intact. Uses
+  `nano-banana-pro` with image_input + adapt prompt.
+
+### Updated
+- INSTALL_PROMPT step 6 now calls `keou_welcome` after the first test —
+  hands the user a curated next-step instead of dumping them mid-flow.
+
 ## [0.4.0] — 2026-05-09
 
 ### Added

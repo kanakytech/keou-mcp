@@ -63,11 +63,17 @@ const SIGNUP_KEOU = process.env.KEOU_SIGNUP_URL || 'https://keou.systems/pro';
 // ─── KIE.AI provider ────────────────────────────────────────────────────────
 // Submit:  POST https://api.kie.ai/api/v1/jobs/createTask
 // Status:  GET  https://api.kie.ai/api/v1/jobs/recordInfo?taskId=...
-// Models:  google/nano-banana (cheap fast), google/nano-banana-pro (4K), nano-banana-2
+//
+// Models (these match what Keou Systems uses in production):
+//   - nano-banana-pro (Gemini 3 Pro Image, 2K/4K) — primary image generation.
+//     Body shape: { model, input: JSON-stringified-object } — note the
+//     stringified input, KIE expects this for the nano-banana family.
+//   - flux-2/pro-image-to-image — for polish, remix, edit-with-prompt.
+//     Body shape: { model, input: object } — standard format.
 
 const KIE_BASE = 'https://api.kie.ai';
 
-async function kieSubmit({ model, input }) {
+async function kieRawSubmit(body) {
   if (!CFG.kieKey) throw new Error('KIE_API_KEY not set — run keou_setup or visit ' + SIGNUP_KIE);
   const res = await fetch(`${KIE_BASE}/api/v1/jobs/createTask`, {
     method: 'POST',
@@ -75,13 +81,40 @@ async function kieSubmit({ model, input }) {
       'authorization': `Bearer ${CFG.kieKey}`,
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ model, input }),
+    body: JSON.stringify(body),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || json?.code !== 200) {
     throw new Error(`KIE.AI ${res.status}: ${json?.msg || json?.message || 'submit failed'}`);
   }
-  return { provider: 'kie', taskId: json.data?.taskId, model };
+  return { provider: 'kie', taskId: json.data?.taskId, model: body.model };
+}
+
+// Generate image with nano-banana-pro (premium default — matches Keou production).
+// Accepts text-only prompts AND image-input prompts (for product visuals from
+// a reference shot). 2K resolution by default; pass resolution: '4K' for hi-fi.
+async function kieGenerateImage({ prompt, sourceImageUrls = [], aspectRatio = '1:1', resolution = '2K', outputFormat = 'png' }) {
+  return kieRawSubmit({
+    model: 'nano-banana-pro',
+    // KIE's nano-banana-pro endpoint expects the input field as a JSON string,
+    // not an object. This is non-standard but verified against Keou production.
+    input: JSON.stringify({
+      image_input: sourceImageUrls,
+      aspect_ratio: aspectRatio,
+      output_format: outputFormat,
+      prompt,
+      resolution,
+    }),
+  });
+}
+
+// Edit existing image with flux-2/pro-image-to-image — used for polish (preset
+// prompts that clean up/lighten/sharpen) and remix (user-supplied prompt).
+async function kieEditImage({ prompt, imageUrl, aspectRatio = '1:1', resolution = '2K' }) {
+  return kieRawSubmit({
+    model: 'flux-2/pro-image-to-image',
+    input: { input_urls: [imageUrl], prompt, aspect_ratio: aspectRatio, resolution },
+  });
 }
 
 async function kieStatus(taskId) {
@@ -202,30 +235,23 @@ async function falStatus(model, requestId) {
   };
 }
 
-// ─── Smart routing ──────────────────────────────────────────────────────────
+// ─── Routing notes ──────────────────────────────────────────────────────────
+// Image-gen / polish / remix / adapt → always KIE.AI (nano-banana-pro and
+//   flux-2/pro-image-to-image — Keou's production stack).
+// Upscale → always FAL.AI (clarity-upscaler — KIE has no first-party upscaler).
+// Video → KIE.AI (Veo 3.1) by default; offers fast/pro switch via the
+//   keou_generate_video tool's `quality` parameter.
 
-function pickProvider(preferred) {
-  if (preferred === 'kie' && CFG.kieKey) return 'kie';
-  if (preferred === 'fal' && CFG.falKey) return 'fal';
-  if (preferred === 'kie' && !CFG.kieKey) throw new Error(`KIE selected but KIE_API_KEY missing — sign up at ${SIGNUP_KIE}`);
-  if (preferred === 'fal' && !CFG.falKey) throw new Error(`FAL selected but FAL_API_KEY missing — sign up at ${SIGNUP_FAL}`);
-  // auto: prefer KIE (cheaper)
-  if (CFG.kieKey) return 'kie';
-  if (CFG.falKey) return 'fal';
-  throw new Error(`No provider configured. Run keou_setup, or sign up at ${SIGNUP_KIE} (cheapest) or ${SIGNUP_FAL}.`);
-}
-
-// Model IDs verified against docs.kie.ai / fal.ai (May 2026).
+// Model IDs aligned with Keou Systems production stack.
+//   Image gen:  nano-banana-pro (Gemini 3 Pro Image, 2K/4K)
+//   Image edit: flux-2/pro-image-to-image (polish, remix, brand application)
+//   Video:      veo3_fast / veo3 (Veo 3.1) — quality/speed tradeoff
+//   Upscale:    fal-ai/clarity-upscaler (FAL — KIE has no first-party upscaler)
 const KIE_DEFAULTS = {
-  image: 'google/nano-banana',           // ~$0.04 per image, fast
-  imagePro: 'google/nano-banana-pro',    // ~$0.10 per image, 4K
-  video: 'veo3_fast',                    // Veo 3.1 Fast (separate /api/v1/veo endpoint)
+  videoFast: 'veo3_fast',                // Veo 3.1 Fast — default for video
   videoPro: 'veo3',                      // Veo 3.1 Quality
 };
 const FAL_DEFAULTS = {
-  image: 'fal-ai/flux/schnell',          // fast + cheap
-  imagePro: 'fal-ai/flux-pro',           // premium quality
-  edit: 'fal-ai/flux/dev/image-to-image',
   upscale: 'fal-ai/clarity-upscaler',
 };
 
@@ -243,57 +269,87 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'keou_welcome',
+    description: 'Show the user a guided welcome to Keou — what they can generate, example prompts to try, key concepts, and pro tips. Call this right after install (or anytime the user asks "what can I do?" / "how does this work?"). Returns a structured guide the assistant should display to the user, picking 1-2 examples to suggest trying together.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'keou_generate_image',
-    description: 'Generate an image from a text prompt (and optional source image). Routes to KIE.AI by default (cheapest, ~$0.04/img) or FAL.AI if explicitly chosen. Returns a taskId — poll keou_get_status to retrieve the result URL.',
+    description: 'Generate a product image with KIE.AI nano-banana-pro (Keou\'s production model — Gemini 3 Pro Image, premium quality). Accepts a text prompt and optionally a source image URL for image-to-image generation. Returns a taskId — poll keou_get_status to retrieve the result URL.',
     inputSchema: {
       type: 'object',
       required: ['prompt'],
       properties: {
-        prompt: { type: 'string', description: 'What to generate. Be specific about subject, lighting, style.' },
-        sourceImageUrl: { type: 'string', description: 'Optional source image URL for image-to-image / reference.' },
-        aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'], description: 'Default 1:1' },
-        quality: { type: 'string', enum: ['fast', 'pro'], description: 'fast = cheap & quick (default), pro = 4K hi-fi' },
-        provider: { type: 'string', enum: ['auto', 'kie', 'fal'], description: 'Default auto (KIE preferred for cost).' },
+        prompt: { type: 'string', description: 'Be specific: subject, setting, lighting, style, mood. The more detail, the better.' },
+        sourceImageUrl: { type: 'string', description: 'Optional reference image. When set, the model uses it as visual input alongside the prompt (image-to-image).' },
+        aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'], description: 'Default 1:1.' },
+        resolution: { type: 'string', enum: ['2K', '4K'], description: 'Default 2K. 4K costs more but is print-ready.' },
       },
     },
   },
   {
-    name: 'keou_generate_video',
-    description: 'Generate a short video from a prompt (and optional source image). Uses KIE.AI Veo 3.1. After submit, poll keou_get_status with provider="kie-veo".',
+    name: 'keou_polish_image',
+    description: 'Polish/retouch an existing image — clean up imperfections, enhance lighting, sharpen detail, balance colors, remove background noise. Keeps the subject and composition exactly as-is. Uses flux-2/pro-image-to-image (Keou\'s production polish model).',
     inputSchema: {
       type: 'object',
-      required: ['prompt'],
+      required: ['imageUrl'],
       properties: {
-        prompt: { type: 'string' },
-        sourceImageUrl: { type: 'string', description: 'Optional source image for image-to-video.' },
-        aspectRatio: { type: 'string', enum: ['16:9', '9:16'], description: 'Default 16:9.' },
-        quality: { type: 'string', enum: ['fast', 'pro'], description: 'fast = veo3_fast (default), pro = veo3 (Quality)' },
+        imageUrl: { type: 'string', description: 'URL of the image to polish.' },
+        aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9'] },
+        resolution: { type: 'string', enum: ['2K', '4K'] },
       },
     },
   },
   {
     name: 'keou_remix_image',
-    description: 'Re-imagine an existing image with a new prompt (image-to-image). Keeps composition, swaps style/subject as directed.',
+    description: 'Re-imagine an existing image with a custom prompt (image-to-image with creative direction). Keeps composition, swaps style/setting/subject details as directed. Uses flux-2/pro-image-to-image.',
     inputSchema: {
       type: 'object',
       required: ['imageUrl', 'prompt'],
       properties: {
         imageUrl: { type: 'string' },
-        prompt: { type: 'string', description: 'How to remix the image.' },
+        prompt: { type: 'string', description: 'How to remix — e.g. "same product but on a marble countertop with golden hour lighting".' },
         aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9'] },
-        provider: { type: 'string', enum: ['auto', 'kie', 'fal'] },
+        resolution: { type: 'string', enum: ['2K', '4K'] },
+      },
+    },
+  },
+  {
+    name: 'keou_adapt_image',
+    description: 'Adapt an existing image to a new aspect ratio while keeping subject and brand-appropriate style intact. Useful for repurposing one shot across IG square, story 9:16, banner 16:9, etc. Uses nano-banana-pro.',
+    inputSchema: {
+      type: 'object',
+      required: ['imageUrl', 'aspectRatio'],
+      properties: {
+        imageUrl: { type: 'string' },
+        aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'], description: 'Target aspect ratio.' },
+        resolution: { type: 'string', enum: ['2K', '4K'] },
+      },
+    },
+  },
+  {
+    name: 'keou_generate_video',
+    description: 'Generate a short video with KIE.AI Veo 3.1. Accepts a text prompt and optionally a source image (image-to-video). After submit, poll keou_get_status with provider="kie-veo".',
+    inputSchema: {
+      type: 'object',
+      required: ['prompt'],
+      properties: {
+        prompt: { type: 'string', description: 'Describe motion, camera movement, mood. E.g. "slow zoom in on the product, soft golden light".' },
+        sourceImageUrl: { type: 'string', description: 'Optional source image for image-to-video.' },
+        aspectRatio: { type: 'string', enum: ['16:9', '9:16'], description: 'Default 16:9.' },
+        quality: { type: 'string', enum: ['fast', 'pro'], description: 'fast = veo3_fast (default), pro = veo3 (higher quality, slower, costs more).' },
       },
     },
   },
   {
     name: 'keou_upscale_image',
-    description: 'Upscale an image (FAL.AI clarity-upscaler). Requires FAL_API_KEY.',
+    description: 'Upscale an image to 2x or 4x its resolution using FAL.AI clarity-upscaler. Requires FAL_API_KEY (separate from KIE.AI). Useful for print or large-format displays.',
     inputSchema: {
       type: 'object',
       required: ['imageUrl'],
       properties: {
         imageUrl: { type: 'string' },
-        scale: { type: 'integer', enum: [2, 4], description: 'Default 2x' },
+        scale: { type: 'integer', enum: [2, 4], description: 'Default 2x.' },
       },
     },
   },
@@ -306,7 +362,7 @@ const TOOLS = [
       properties: {
         taskId: { type: 'string' },
         provider: { type: 'string', enum: ['kie', 'kie-veo', 'fal'] },
-        model: { type: 'string', description: 'Required for FAL provider (e.g. fal-ai/flux/schnell)' },
+        model: { type: 'string', description: 'Required for FAL provider (e.g. fal-ai/clarity-upscaler).' },
       },
     },
   },
@@ -395,30 +451,141 @@ const HANDLERS = {
       : 'All tiers unlocked.',
   }),
 
-  keou_generate_image: async ({ prompt, sourceImageUrl, aspectRatio = '1:1', quality = 'fast', provider = 'auto' }) => {
-    const p = pickProvider(provider);
-    if (p === 'kie') {
-      const model = quality === 'pro' ? KIE_DEFAULTS.imagePro : KIE_DEFAULTS.image;
-      const input = { prompt, image_size: aspectRatio };
-      if (sourceImageUrl) input.image_urls = [sourceImageUrl];
-      return kieSubmit({ model, input });
-    }
-    // fal
-    const model = sourceImageUrl ? FAL_DEFAULTS.edit : (quality === 'pro' ? FAL_DEFAULTS.imagePro : FAL_DEFAULTS.image);
-    const sizeMap = { '1:1': 'square', '3:4': 'portrait_4_3', '4:3': 'landscape_4_3', '9:16': 'portrait_16_9', '16:9': 'landscape_16_9', '21:9': 'landscape_16_9' };
-    const input = { prompt, image_size: sizeMap[aspectRatio] || 'square' };
-    if (sourceImageUrl) input.image_url = sourceImageUrl;
-    return falSubmit({ model, input });
+  keou_welcome: async () => ({
+    title: 'Welcome to Keou — your AI design assistant in Claude.',
+    intro: 'You can now generate product images, videos, and design assets directly from this chat. Here\'s how to get the most out of it. The assistant should pick 1-2 examples below and offer to try one with the user right now — don\'t dump the whole guide.',
+
+    quickStart: {
+      heading: 'Try one of these right now',
+      examples: [
+        {
+          label: 'Studio product shot',
+          prompt: 'Generate a moody studio shot of a black leather wallet on dark slate, single soft key light from the right, premium luxury feel, 1:1, 2K.',
+          tool: 'keou_generate_image',
+          why: 'Best when you want a clean, high-end product image from scratch.',
+        },
+        {
+          label: 'Lifestyle scene from a reference',
+          prompt: 'Same product as in this reference, but staged on a marble kitchen countertop with morning light streaming in, casual lifestyle feel.',
+          tool: 'keou_generate_image',
+          requires: 'sourceImageUrl',
+          why: 'Best when you have a real product photo and want it placed in a new context.',
+        },
+        {
+          label: 'Polish a rough phone shot',
+          prompt: '(no prompt needed — keou_polish_image cleans up automatically)',
+          tool: 'keou_polish_image',
+          requires: 'imageUrl',
+          why: 'Best for cleaning up uneven lighting, distracting backgrounds, or low-light shots.',
+        },
+        {
+          label: 'Remix into a different scene',
+          prompt: 'Reimagine this product on a sunset beach with warm orange backlight and shallow depth of field.',
+          tool: 'keou_remix_image',
+          requires: 'imageUrl',
+          why: 'Best when you have one good shot and want to multiply it into different settings.',
+        },
+        {
+          label: 'Repurpose for IG story / TikTok (9:16)',
+          prompt: '(set aspectRatio: "9:16" — keou_adapt_image reframes automatically)',
+          tool: 'keou_adapt_image',
+          requires: 'imageUrl + aspectRatio',
+          why: 'Best when you have a finished horizontal/square shot and need a vertical version for stories or reels.',
+        },
+        {
+          label: 'Cinematic product video',
+          prompt: 'Slow cinematic dolly-in on the product, soft golden hour light, shallow depth of field, 5 seconds.',
+          tool: 'keou_generate_video',
+          why: 'Best for ad creatives, IG reels, hero videos. Costs more than images — use sparingly.',
+        },
+      ],
+    },
+
+    keyConcepts: [
+      {
+        name: 'Generate vs Polish vs Remix vs Adapt',
+        detail: 'Generate makes a new image from a prompt (or prompt + reference). Polish cleans up an existing image without changing it. Remix re-imagines an existing image with new direction. Adapt re-frames an existing image to a different aspect ratio.',
+      },
+      {
+        name: 'Resolution: 2K vs 4K',
+        detail: '2K is the default — fast, cheap, looks great on screen. 4K costs more but is print-ready. Use 4K only when you need it.',
+      },
+      {
+        name: 'Aspect ratios',
+        detail: '1:1 (Instagram square), 9:16 (Stories / Reels / TikTok), 16:9 (banners / video), 4:3 / 3:4 (classic photo). Adapt is the fastest way to make all formats from one source.',
+      },
+      {
+        name: 'Async by design',
+        detail: 'Generation takes 10–60 seconds. Every tool returns a taskId — call keou_get_status with the same provider/taskId to check progress. The assistant should poll automatically.',
+      },
+    ],
+
+    proTips: [
+      'Be specific in prompts: subject + setting + lighting + mood + style. Vague prompts give vague results.',
+      'For brand consistency across multiple images, describe your color palette, lighting style, and composition rules in every prompt.',
+      'Use polish before remix when your starting image is rough — better source = better remix.',
+      'Pack of 30 variants from one source is a Keou Pro feature ($19/mo) — saves ~25h vs doing it manually.',
+    ],
+
+    cost: {
+      heading: 'What it costs (you pay KIE.AI / FAL.AI directly, no Keou markup)',
+      bullets: [
+        'Image gen / polish / remix / adapt: ~$0.04–0.10 per image (2K), ~$0.20–0.30 (4K)',
+        'Video (Veo 3.1 fast): ~$0.40 per second of video',
+        'Upscale (FAL clarity-upscaler): ~$0.05 per image',
+      ],
+      note: 'KIE.AI gives free credits on signup. The maintainer earns a 15% referral commission on your first 30 days through https://kie.ai?ref=ec0e98ef53c18d6f13f05629a9ffd793 — that\'s how this stays free open source.',
+    },
+
+    nextSteps: {
+      heading: 'When you outgrow single images',
+      pro: 'Keou Pro ($19/mo) unlocks: pack_30_variants (one source → 30 ad-ready format variants in parallel), brand_kit_apply (auto-apply your brand colors/fonts/logo across every gen), persistent history, team sharing. https://keou.systems/pro',
+      agency: 'For studios going white-label for clients: Keou Agency tier ($499/mo) deploys Keou under your brand. Contact k.wahuzuepro@gmail.com.',
+    },
+
+    assistantInstructions: 'After showing this guide, pick ONE example matching what the user seems to want (or ask if unclear), and offer to run it now. Don\'t lecture — be a friendly assistant. The user just installed something and wants to feel the magic immediately.',
+  }),
+
+  keou_generate_image: async ({ prompt, sourceImageUrl, aspectRatio = '1:1', resolution = '2K' }) => {
+    if (!CFG.kieKey) throw new Error(`Image generation requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+    const sourceImageUrls = sourceImageUrl ? [sourceImageUrl] : [];
+    return kieGenerateImage({ prompt, sourceImageUrls, aspectRatio, resolution });
+  },
+
+  keou_polish_image: async ({ imageUrl, aspectRatio = '1:1', resolution = '2K' }) => {
+    if (!CFG.kieKey) throw new Error(`Polish requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+    if (!imageUrl) throw new Error('imageUrl required');
+    const polishPrompt = 'Clean up imperfections, enhance lighting, sharpen detail, balance colors, remove distracting background noise. Keep subject and composition exactly as-is.';
+    return kieEditImage({ prompt: polishPrompt, imageUrl, aspectRatio, resolution });
+  },
+
+  keou_remix_image: async ({ imageUrl, prompt, aspectRatio = '1:1', resolution = '2K' }) => {
+    if (!CFG.kieKey) throw new Error(`Remix requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+    if (!imageUrl) throw new Error('imageUrl required');
+    if (!prompt?.trim()) throw new Error('prompt required — describe how to remix the image');
+    return kieEditImage({ prompt, imageUrl, aspectRatio, resolution });
+  },
+
+  keou_adapt_image: async ({ imageUrl, aspectRatio, resolution = '2K' }) => {
+    if (!CFG.kieKey) throw new Error(`Adapt requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+    if (!imageUrl) throw new Error('imageUrl required');
+    if (!aspectRatio) throw new Error('aspectRatio required (e.g. "9:16")');
+    // Adapt = re-render the same subject in a new aspect ratio. Uses
+    // nano-banana-pro with image_input + a minimal prompt asking it to keep
+    // composition while reframing.
+    const adaptPrompt = 'Adapt this image to the new aspect ratio. Keep subject, lighting, and brand-appropriate style. Recompose the framing as needed for the new ratio without distorting the subject.';
+    return kieGenerateImage({
+      prompt: adaptPrompt,
+      sourceImageUrls: [imageUrl],
+      aspectRatio,
+      resolution,
+    });
   },
 
   keou_generate_video: async ({ prompt, sourceImageUrl, aspectRatio = '16:9', quality = 'fast' }) => {
     if (!CFG.kieKey) throw new Error(`Video requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
-    const model = quality === 'pro' ? KIE_DEFAULTS.videoPro : KIE_DEFAULTS.video;
+    const model = quality === 'pro' ? KIE_DEFAULTS.videoPro : KIE_DEFAULTS.videoFast;
     return kieVeoSubmit({ prompt, model, aspectRatio, imageUrl: sourceImageUrl });
-  },
-
-  keou_remix_image: async ({ imageUrl, prompt, aspectRatio, provider = 'auto' }) => {
-    return HANDLERS.keou_generate_image({ prompt, sourceImageUrl: imageUrl, aspectRatio, provider });
   },
 
   keou_upscale_image: async ({ imageUrl, scale = 2 }) => {
@@ -530,4 +697,4 @@ const have = [];
 if (CFG.kieKey) have.push('KIE');
 if (CFG.falKey) have.push('FAL');
 if (CFG.keouKey) have.push('Keou Pro');
-process.stderr.write(`[keou-mcp v0.4.0] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
+process.stderr.write(`[keou-mcp v0.5.0] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);

@@ -89,15 +89,20 @@ You can configure both KIE and FAL — the MCP picks per-task: KIE for cost-sens
 
 ### Free tier (BYOK)
 
+All image tools use Keou's production model stack: `nano-banana-pro` for generation/adapt, `flux-2/pro-image-to-image` for polish/remix, Veo 3.1 for video, FAL clarity-upscaler for upscale.
+
 | Tool | What it does | Inputs |
 |---|---|---|
 | `keou_setup` | First-run wizard. Returns signup links + config instructions. | — |
+| `keou_welcome` | Structured guide — example prompts, key concepts, costs, pro tips. Called by the install prompt after the first test image. | — |
 | `keou_status_keys` | Show which keys are configured and what's unlocked. | — |
-| `keou_generate_image` | Generate a creative asset from a brief (and optional source). | `prompt`, `aspectRatio?`, `quality?`, `provider?`, `sourceImageUrl?` |
-| `keou_generate_video` | Short-form video from a brief + optional source (Veo 3.1). | `prompt`, `sourceImageUrl?`, `aspectRatio?`, `quality?` |
-| `keou_remix_image` | Re-imagine an existing asset with new direction. | `imageUrl`, `prompt`, `aspectRatio?`, `provider?` |
-| `keou_upscale_image` | Upscale a finished asset to print-ready resolution. | `imageUrl`, `scale?` |
-| `keou_get_status` | Poll an in-flight render. | `taskId`, `provider`, `model?` |
+| `keou_generate_image` | Text-to-image, or image-to-image with `sourceImageUrl`. `nano-banana-pro`, 2K default. | `prompt`, `sourceImageUrl?`, `aspectRatio?`, `resolution?` (`2K`/`4K`) |
+| `keou_polish_image` | Clean up imperfections, enhance lighting, sharpen detail. Preserves composition. | `imageUrl`, `aspectRatio?`, `resolution?` |
+| `keou_remix_image` | Re-imagine an existing image with a custom prompt (creative direction). | `imageUrl`, `prompt`, `aspectRatio?`, `resolution?` |
+| `keou_adapt_image` | Re-render in a new aspect ratio (1:1 → 9:16 for stories, etc). | `imageUrl`, `aspectRatio`, `resolution?` |
+| `keou_generate_video` | Short video from prompt + optional source. Veo 3.1 (`fast` or `pro`). | `prompt`, `sourceImageUrl?`, `aspectRatio?`, `quality?` |
+| `keou_upscale_image` | Upscale 2x or 4x via FAL clarity-upscaler. Requires `FAL_API_KEY`. | `imageUrl`, `scale?` |
+| `keou_get_status` | Poll a generation. Pass back `taskId` + `provider` from submit. | `taskId`, `provider` (`kie`/`kie-veo`/`fal`), `model?` (FAL only) |
 
 ### Premium (Keou Pro)
 
