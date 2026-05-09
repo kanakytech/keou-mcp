@@ -1,0 +1,39 @@
+# Smithery MCP server manifest — https://smithery.ai/docs/build
+# Indexes keou-mcp in Smithery's directory so users can install with:
+#   npx @smithery/cli install @kanakytech/keou-mcp --client claude
+
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    title: Keou MCP configuration
+    description: |
+      Bring Your Own Key. KIE.AI is the cheapest provider (~$0.04/img, signup gives free credits).
+      FAL.AI is optional for premium quality (Flux Pro) and image upscaling.
+      Keou Pro key is optional and unlocks pack_30_variants + brand_kit_apply.
+    properties:
+      kieKey:
+        type: string
+        title: KIE.AI API key
+        description: "Get one free at https://kie.ai (default provider, cheapest)."
+      falKey:
+        type: string
+        title: FAL.AI API key
+        description: "Optional. For premium quality (Flux) and clarity-upscaler. Get at https://fal.ai."
+      keouKey:
+        type: string
+        title: Keou Pro API key
+        description: "Optional. Unlocks pack_30_variants + brand_kit_apply. Get at https://keou.systems/pro."
+  commandFunction: |
+    (config) => ({
+      command: 'node',
+      args: ['server.js'],
+      env: {
+        KIE_API_KEY: config.kieKey || '',
+        FAL_API_KEY: config.falKey || '',
+        KEOU_API_KEY: config.keouKey || ''
+      }
+    })
+
+build:
+  dockerfile: Dockerfile
