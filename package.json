@@ -1,6 +1,6 @@
 {
   "name": "keou-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "MCP server bridging Claude (Code/Desktop) to KIE.AI + FAL.AI — generate product visuals from any chat. BYOK.",
   "keywords": [
     "mcp",
@@ -33,6 +33,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4"
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "sharp": "^0.34.5"
   }
 }
