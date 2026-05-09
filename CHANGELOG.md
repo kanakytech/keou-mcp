@@ -5,6 +5,36 @@ All notable changes to keou-mcp documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-05-10
+
+### Added
+- `keou_text_to_speech` — voice-over from text via ElevenLabs Turbo v2.5
+  (hosted on KIE). Tunable voice, stability, similarity_boost, style, speed.
+  Output renders inline as an MCP `audio` content block in the chat.
+- `keou_generate_sfx` — short sound effect from a text description via
+  ElevenLabs Sound Effects v2. Optional `durationSeconds`. Renders inline.
+- `keou_upscale_video` — upscale 720p AI video to 4K via Topaz on KIE.
+
+### Changed
+- `keou_upscale_image` switched from FAL clarity-upscaler to Topaz on KIE
+  (`topaz/image-upscale`) — Keou's production upscaler. No more FAL_API_KEY
+  needed; the user runs everything off a single KIE.AI key.
+- `keou_welcome` rewritten to enumerate the full capability map (images,
+  video, audio, premium) with example prompts, real KIE.AI pricing, and
+  explicit assistant instructions to pick ONE example matching the user's
+  intent rather than dumping the whole guide.
+- `fetchAsImageBlock` renamed to `fetchAsContentBlock` — now returns image
+  OR audio MCP blocks based on response content-type. TTS / SFX results
+  render as `audio` blocks; images keep the `image` block path.
+- Pricing in `keou_welcome` and the install prompt corrected from $0.04 to
+  $0.09 per image (the real nano-banana-pro rate Keou pays). Added pricing
+  for video, upscale, TTS, SFX.
+
+### Removed
+- FAL_API_KEY is no longer required for any tool. Users with an existing
+  FAL key can continue setting it as an env var, but every routing path now
+  defaults to KIE.AI.
+
 ## [0.6.0] — 2026-05-09
 
 ### Added

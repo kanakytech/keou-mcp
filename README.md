@@ -80,7 +80,7 @@ For Claude Desktop, paste this into `~/Library/Application Support/Claude/claude
 
 | Provider | Best for | Cost | Free credits | Sign up |
 |---|---|---|---|---|
-| **KIE.AI** | Cheapest, fastest. Default. | ~$0.04/image (nano-banana) | Yes | [kie.ai](https://kie.ai?ref=ec0e98ef53c18d6f13f05629a9ffd793) |
+| **KIE.AI** | Powers everything (image, video, audio, upscale). | $0.09/img, $0.25/s video, $0.05 audio | Yes | [kie.ai](https://kie.ai?ref=ec0e98ef53c18d6f13f05629a9ffd793) |
 | **FAL.AI** | Premium quality (Flux Pro). | ~$0.10/image | Yes | [fal.ai](https://fal.ai) |
 | **Keou Pro** *(optional)* | Pack of 30 variants, brand kit, history, team | $19/mo, 15 free | Yes | [keou.systems/pro](https://keou.systems/pro) |
 
@@ -92,7 +92,15 @@ You can configure both KIE and FAL — the MCP picks per-task: KIE for cost-sens
 
 ### Free tier (BYOK)
 
-All image tools use Keou's production model stack: `nano-banana-pro` for generation/adapt, `flux-2/pro-image-to-image` for polish/remix, Veo 3.1 for video, FAL clarity-upscaler for upscale.
+Tools below use Keou's production model stack — same models the paid SaaS uses internally:
+- Image gen / adapt: `nano-banana-pro` (Gemini 3 Pro Image)
+- Polish / remix: `flux-2/pro-image-to-image`
+- Video: KIE.AI Veo 3.1 (`veo3_fast` default, `veo3` pro)
+- Image / video upscale: `topaz/image-upscale` and `topaz/video-upscale`
+- Voice-over: ElevenLabs Turbo v2.5
+- Sound effects: ElevenLabs Sound Effects v2
+
+All routed through the user's single `KIE_API_KEY` — no FAL.AI key needed.
 
 | Tool | What it does | Inputs |
 |---|---|---|
@@ -104,8 +112,11 @@ All image tools use Keou's production model stack: `nano-banana-pro` for generat
 | `keou_remix_image` | Re-imagine an existing image with a custom prompt (creative direction). | `imageUrl`, `prompt`, `aspectRatio?`, `resolution?` |
 | `keou_adapt_image` | Re-render in a new aspect ratio (1:1 → 9:16 for stories, etc). | `imageUrl`, `aspectRatio`, `resolution?` |
 | `keou_generate_video` | Short video from prompt + optional source. Veo 3.1 (`fast` or `pro`). | `prompt`, `sourceImageUrl?`, `aspectRatio?`, `quality?` |
-| `keou_upscale_image` | Upscale 2x or 4x via FAL clarity-upscaler. Requires `FAL_API_KEY`. | `imageUrl`, `scale?` |
-| `keou_get_status` | Poll a generation. Pass back `taskId` + `provider` from submit. | `taskId`, `provider` (`kie`/`kie-veo`/`fal`), `model?` (FAL only) |
+| `keou_upscale_image` | Upscale 2x or 4x via Topaz on KIE. | `imageUrl`, `scale?` |
+| `keou_upscale_video` | Upscale a video to 4K via Topaz on KIE. | `videoUrl`, `scale?` |
+| `keou_text_to_speech` | Voice-over from text via ElevenLabs Turbo v2.5. Default voice "Rachel". | `text`, `voice?`, `stability?`, `similarityBoost?`, `style?`, `speed?` |
+| `keou_generate_sfx` | Short sound effect from a text description (ElevenLabs SFX v2). | `text`, `durationSeconds?` |
+| `keou_get_status` | Poll a generation. Pass back `taskId` + `provider` from submit. Inlines image/audio results directly in chat when ready. | `taskId`, `provider` (`kie`/`kie-veo`/`fal`), `model?` (FAL only) |
 
 ### Premium (Keou Pro)
 

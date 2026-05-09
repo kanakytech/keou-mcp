@@ -27,7 +27,7 @@ the install command. Anything else triggers `error: unknown command 'env'`.
 I want to install Keou MCP — an open-source tool that lets me generate product images and videos directly from this Claude chat. Please walk me through it step by step, I'm not technical.
 
 Step 1 — Get my KIE.AI key first (the install needs it):
-I need a KIE.AI key to generate images (~$0.04 per image, free credits on signup). Ask me if I have one already.
+I need a KIE.AI key — it powers everything (image generation, video, voice-over, sound effects, upscale). Pricing roughly: $0.09 per image, ~$0.25 per second of video, $0.05 per voice-over or SFX. Free credits on signup. Ask me if I have a key already.
 - If yes: ask me to paste it in this chat now.
 - If no: send me to https://kie.ai?ref=ec0e98ef53c18d6f13f05629a9ffd793, tell me to sign up (free), open Settings → API Key, copy the key, then paste it back here.
 Wait until I've actually pasted the key before moving on.

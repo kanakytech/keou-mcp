@@ -67,20 +67,24 @@ const SIGNUP_KEOU = process.env.KEOU_SIGNUP_URL || 'https://keou.systems/pro';
 // Videos: MCP has no native `video` block, so we keep them as a clickable URL.
 
 const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']);
+const INLINE_AUDIO_TYPES = new Set(['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/ogg']);
 const INLINE_MAX_BYTES = 8 * 1024 * 1024; // 8MB hard cap before we fall back to URL-only
 const INLINE_FETCH_TIMEOUT_MS = 30_000;
 
 function inferMimeFromUrl(url) {
   const ext = (url.split('?')[0].split('#')[0].split('.').pop() || '').toLowerCase();
-  return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' })[ext] || null;
+  return ({
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
+  })[ext] || null;
 }
 
 /**
- * Fetch a URL and turn it into an MCP image content block. Returns null on
- * any failure (non-200, non-image type, oversized, timeout) so the caller can
- * fall back to a text-with-URL block.
+ * Fetch a URL and turn it into an MCP image OR audio content block. Returns
+ * null on any failure (non-200, unsupported type, oversized, timeout) so the
+ * caller can fall back to a text-with-URL block.
  */
-async function fetchAsImageBlock(url) {
+async function fetchAsContentBlock(url) {
   if (!url) return null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), INLINE_FETCH_TIMEOUT_MS);
@@ -88,18 +92,24 @@ async function fetchAsImageBlock(url) {
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) return null;
     let mimeType = res.headers.get('content-type')?.split(';')[0]?.trim() || inferMimeFromUrl(url);
-    if (!mimeType || !INLINE_IMAGE_TYPES.has(mimeType.toLowerCase())) return null;
+    if (!mimeType) return null;
+    const lower = mimeType.toLowerCase();
+    const kind = INLINE_IMAGE_TYPES.has(lower) ? 'image' : INLINE_AUDIO_TYPES.has(lower) ? 'audio' : null;
+    if (!kind) return null;
     const len = parseInt(res.headers.get('content-length') || '0', 10);
     if (len && len > INLINE_MAX_BYTES) return null;
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.byteLength > INLINE_MAX_BYTES) return null;
-    return { type: 'image', data: buf.toString('base64'), mimeType };
+    return { type: kind, data: buf.toString('base64'), mimeType };
   } catch {
     return null;
   } finally {
     clearTimeout(timer);
   }
 }
+
+// Backward-compatible alias — older call sites used the image-only name.
+const fetchAsImageBlock = fetchAsContentBlock;
 
 /**
  * Build an MCP `content` array from a status payload. Inlines image URLs as
@@ -113,9 +123,9 @@ async function buildResultContent(status, { headerText } = {}) {
 
   let inlinedCount = 0;
   for (const url of urls) {
-    const img = await fetchAsImageBlock(url);
-    if (img) {
-      blocks.push(img);
+    const block = await fetchAsContentBlock(url);
+    if (block) {
+      blocks.push(block);
       inlinedCount++;
     } else {
       // Video / oversized / fetch failure → keep as a clickable text URL
@@ -186,6 +196,41 @@ async function kieEditImage({ prompt, imageUrl, aspectRatio = '1:1', resolution 
     model: 'flux-2/pro-image-to-image',
     input: { input_urls: [imageUrl], prompt, aspect_ratio: aspectRatio, resolution },
   });
+}
+
+// Upscale image with Topaz on KIE (Keou's production upscaler, not FAL).
+async function kieUpscaleImage({ imageUrl, upscaleFactor = 2 }) {
+  return kieRawSubmit({
+    model: 'topaz/image-upscale',
+    input: { image_url: imageUrl, upscale_factor: upscaleFactor },
+  });
+}
+
+// Upscale video with Topaz on KIE.
+async function kieUpscaleVideo({ videoUrl, upscaleFactor = 2 }) {
+  return kieRawSubmit({
+    model: 'topaz/video-upscale',
+    input: { video_url: videoUrl, upscale_factor: upscaleFactor },
+  });
+}
+
+// Text-to-speech via ElevenLabs hosted on KIE. Default voice 'Rachel'
+// (calm, warm narrator) — same default Keou production uses. Caller can
+// pass any ElevenLabs voice name.
+async function kieTts({ text, voice = 'Rachel', stability, similarityBoost, style, speed }) {
+  const input = { text, voice };
+  if (stability !== undefined) input.stability = stability;
+  if (similarityBoost !== undefined) input.similarity_boost = similarityBoost;
+  if (style !== undefined) input.style = style;
+  if (speed !== undefined) input.speed = speed;
+  return kieRawSubmit({ model: 'elevenlabs/text-to-speech-turbo-2-5', input });
+}
+
+// Sound effects via ElevenLabs Sound Effects v2 on KIE.
+async function kieSfx({ text, durationSeconds }) {
+  const input = { text };
+  if (durationSeconds) input.duration_seconds = durationSeconds;
+  return kieRawSubmit({ model: 'elevenlabs/sound-effect-v2', input });
 }
 
 async function kieStatus(taskId) {
@@ -414,13 +459,53 @@ const TOOLS = [
   },
   {
     name: 'keou_upscale_image',
-    description: 'Upscale an image to 2x or 4x its resolution using FAL.AI clarity-upscaler. Requires FAL_API_KEY (separate from KIE.AI). Useful for print or large-format displays.',
+    description: 'Upscale an image to 2x or 4x its resolution using Topaz on KIE.AI (Keou\'s production upscaler). Useful for print, large-format displays, or after an AI render at 2K when you need 4K+.',
     inputSchema: {
       type: 'object',
       required: ['imageUrl'],
       properties: {
         imageUrl: { type: 'string' },
         scale: { type: 'integer', enum: [2, 4], description: 'Default 2x.' },
+      },
+    },
+  },
+  {
+    name: 'keou_upscale_video',
+    description: 'Upscale a video to 2x or 4x its resolution using Topaz on KIE.AI. Best for cleaning up AI-generated 720p video to 4K for ads or hero content. More expensive than image upscale.',
+    inputSchema: {
+      type: 'object',
+      required: ['videoUrl'],
+      properties: {
+        videoUrl: { type: 'string' },
+        scale: { type: 'integer', enum: [2, 4], description: 'Default 2x.' },
+      },
+    },
+  },
+  {
+    name: 'keou_text_to_speech',
+    description: 'Generate voice-over audio from text via ElevenLabs Turbo v2.5 (hosted on KIE.AI). Default voice "Rachel" (calm warm narrator). Supports tuning stability, similarity_boost, style, speed. After submit, poll keou_get_status — when ready, the MP3 will render inline as an audio block.',
+    inputSchema: {
+      type: 'object',
+      required: ['text'],
+      properties: {
+        text: { type: 'string', description: 'The script to read aloud. Plain English (or French, Spanish, etc — model is multilingual).' },
+        voice: { type: 'string', description: 'ElevenLabs voice name. Default "Rachel". Try "Adam", "Antoni", "Bella", "Clyde", "Domi", "Elli", "Sam", "Charlie", etc.' },
+        stability: { type: 'number', description: '0–1. Higher = more consistent, lower = more expressive. Default ~0.5.' },
+        similarityBoost: { type: 'number', description: '0–1. Higher = closer to source voice character.' },
+        style: { type: 'number', description: '0–1. Style exaggeration.' },
+        speed: { type: 'number', description: '0.7–1.2. Speaking rate multiplier.' },
+      },
+    },
+  },
+  {
+    name: 'keou_generate_sfx',
+    description: 'Generate a short sound effect from a text description via ElevenLabs Sound Effects v2 (hosted on KIE.AI). E.g. "soft camera shutter click", "thunderstorm distant", "champagne pop". After submit, poll keou_get_status — the audio renders inline.',
+    inputSchema: {
+      type: 'object',
+      required: ['text'],
+      properties: {
+        text: { type: 'string', description: 'Describe the sound — be specific about texture, distance, intensity.' },
+        durationSeconds: { type: 'number', description: 'Optional duration in seconds (typically 1–10).' },
       },
     },
   },
@@ -489,7 +574,7 @@ const HANDLERS = {
       },
       providers: {
         kie: {
-          why: 'Cheapest provider (~$0.04/image with nano-banana). Fast. Good for batch.',
+          why: 'Powers all Keou capabilities (image gen, polish, remix, video, upscale, TTS, SFX). $0.09/image (nano-banana-pro), free credits on signup.',
           signup: SIGNUP_KIE,
           freeCredits: 'Yes, on signup',
         },
@@ -512,109 +597,106 @@ const HANDLERS = {
     fal:  CFG.falKey  ? `configured (${CFG.falKey.slice(0, 6)}…)` : 'not set',
     keouPro: CFG.keouKey ? `configured (${CFG.keouKey.slice(0, 10)}…)` : 'not set — premium tools locked',
     unlockedTools: [
-      ...(CFG.kieKey || CFG.falKey ? ['keou_generate_image', 'keou_generate_video', 'keou_remix_image', 'keou_upscale_image', 'keou_get_status'] : []),
-      ...(CFG.keouKey ? ['keou_pack_30_variants', 'keou_brand_kit_apply'] : []),
+      ...(CFG.kieKey ? [
+        'keou_generate_image', 'keou_polish_image', 'keou_remix_image', 'keou_adapt_image',
+        'keou_generate_video', 'keou_upscale_image', 'keou_upscale_video',
+        'keou_text_to_speech', 'keou_generate_sfx', 'keou_get_status', 'keou_welcome',
+      ] : []),
+      ...(CFG.keouKey ? ['keou_pack_30_variants', 'keou_pack_status', 'keou_brand_kit_apply'] : []),
     ],
-    suggestion: !CFG.kieKey && !CFG.falKey
-      ? `No provider key set. Run keou_setup, or sign up at ${SIGNUP_KIE} (cheapest).`
+    suggestion: !CFG.kieKey
+      ? `No KIE.AI key set. Run keou_setup, or sign up at ${SIGNUP_KIE}.`
       : !CFG.keouKey
       ? `Pro tip: unlock batch packs (30 variants in parallel) → ${SIGNUP_KEOU}`
       : 'All tiers unlocked.',
   }),
 
   keou_welcome: async () => ({
-    title: 'Welcome to Keou — your AI design assistant in Claude.',
-    intro: 'You can now generate product images, videos, and design assets directly from this chat. Here\'s how to get the most out of it. The assistant should pick 1-2 examples below and offer to try one with the user right now — don\'t dump the whole guide.',
+    title: 'Welcome to Keou — your AI creative studio in Claude.',
+    intro: 'You can now generate product images, videos, voice-overs, and sound effects directly from this chat. Below is the full capability map plus example prompts. The assistant should NOT dump everything — pick ONE category matching what the user wants (or ask) and offer to run a specific example with them.',
 
-    quickStart: {
-      heading: 'Try one of these right now',
-      examples: [
-        {
-          label: 'Studio product shot',
-          prompt: 'Generate a moody studio shot of a black leather wallet on dark slate, single soft key light from the right, premium luxury feel, 1:1, 2K.',
-          tool: 'keou_generate_image',
-          why: 'Best when you want a clean, high-end product image from scratch.',
-        },
-        {
-          label: 'Lifestyle scene from a reference',
-          prompt: 'Same product as in this reference, but staged on a marble kitchen countertop with morning light streaming in, casual lifestyle feel.',
-          tool: 'keou_generate_image',
-          requires: 'sourceImageUrl',
-          why: 'Best when you have a real product photo and want it placed in a new context.',
-        },
-        {
-          label: 'Polish a rough phone shot',
-          prompt: '(no prompt needed — keou_polish_image cleans up automatically)',
-          tool: 'keou_polish_image',
-          requires: 'imageUrl',
-          why: 'Best for cleaning up uneven lighting, distracting backgrounds, or low-light shots.',
-        },
-        {
-          label: 'Remix into a different scene',
-          prompt: 'Reimagine this product on a sunset beach with warm orange backlight and shallow depth of field.',
-          tool: 'keou_remix_image',
-          requires: 'imageUrl',
-          why: 'Best when you have one good shot and want to multiply it into different settings.',
-        },
-        {
-          label: 'Repurpose for IG story / TikTok (9:16)',
-          prompt: '(set aspectRatio: "9:16" — keou_adapt_image reframes automatically)',
-          tool: 'keou_adapt_image',
-          requires: 'imageUrl + aspectRatio',
-          why: 'Best when you have a finished horizontal/square shot and need a vertical version for stories or reels.',
-        },
-        {
-          label: 'Cinematic product video',
-          prompt: 'Slow cinematic dolly-in on the product, soft golden hour light, shallow depth of field, 5 seconds.',
-          tool: 'keou_generate_video',
-          why: 'Best for ad creatives, IG reels, hero videos. Costs more than images — use sparingly.',
-        },
-      ],
+    capabilities: {
+      images: {
+        heading: 'Images — text-to-image, image-to-image, polish, remix, adapt',
+        tools: [
+          { tool: 'keou_generate_image', usage: 'Text-to-image (prompt only) OR image-to-image (prompt + sourceImageUrl). Default 1:1, 2K.', model: 'nano-banana-pro (Gemini 3 Pro Image)' },
+          { tool: 'keou_polish_image', usage: 'Clean up imperfections, balance lighting, sharpen detail. Keeps composition intact.', model: 'flux-2/pro-image-to-image' },
+          { tool: 'keou_remix_image', usage: 'Re-imagine an existing image with a custom prompt (new setting / mood / style).', model: 'flux-2/pro-image-to-image' },
+          { tool: 'keou_adapt_image', usage: 'Re-render an existing image in a new aspect ratio (1:1 → 9:16 for stories, etc).', model: 'nano-banana-pro' },
+          { tool: 'keou_upscale_image', usage: 'Upscale 2x or 4x to print-ready resolution.', model: 'topaz/image-upscale' },
+        ],
+      },
+      video: {
+        heading: 'Video — image-to-video + cinematic motion',
+        tools: [
+          { tool: 'keou_generate_video', usage: 'Text-to-video or image-to-video. Quality "fast" (veo3_fast, default) or "pro" (veo3 — higher fidelity, slower).', model: 'KIE.AI Veo 3.1' },
+          { tool: 'keou_upscale_video', usage: 'Upscale a 720p AI video to 4K for ad / hero use.', model: 'topaz/video-upscale' },
+        ],
+      },
+      audio: {
+        heading: 'Audio — voice-over and sound effects',
+        tools: [
+          { tool: 'keou_text_to_speech', usage: 'Voice-over from text. Default voice "Rachel" — pass any ElevenLabs voice (Adam, Bella, Antoni, Sam, Charlie, etc). Multilingual.', model: 'ElevenLabs Turbo v2.5' },
+          { tool: 'keou_generate_sfx', usage: 'Short sound effect from a text description (e.g. "soft camera shutter click", "champagne pop", "rain on window").', model: 'ElevenLabs Sound Effects v2' },
+        ],
+      },
+      premium: {
+        heading: 'Premium (require Keou Pro account)',
+        tools: [
+          { tool: 'keou_pack_30_variants', usage: 'Fan one finished source image into 30 format-perfect variants in parallel — IG square, story, reel, TikTok, banners, ad creatives. Saves ~25h of manual reformatting per pack.' },
+          { tool: 'keou_brand_kit_apply', usage: 'Auto-apply brand colors, fonts, logo, voice across every gen. (v0.5 preview — pass brand details in prompts as a workaround for now.)' },
+        ],
+      },
     },
 
+    quickStartExamples: [
+      { label: 'Studio product shot', tool: 'keou_generate_image', prompt: 'Moody studio shot of a black leather wallet on dark slate, single soft key light from the right, premium luxury feel, 1:1, 2K.' },
+      { label: 'Lifestyle scene from a reference', tool: 'keou_generate_image', prompt: 'Same product as in this reference, staged on a marble kitchen countertop with morning light streaming in, casual lifestyle feel.', requires: 'sourceImageUrl' },
+      { label: 'Polish a rough phone shot', tool: 'keou_polish_image', requires: 'imageUrl' },
+      { label: 'Remix into a different scene', tool: 'keou_remix_image', prompt: 'Reimagine this product on a sunset beach with warm orange backlight and shallow depth of field.', requires: 'imageUrl' },
+      { label: 'Repurpose for IG story (9:16)', tool: 'keou_adapt_image', requires: 'imageUrl + aspectRatio: "9:16"' },
+      { label: 'Cinematic 5-second product video', tool: 'keou_generate_video', prompt: 'Slow cinematic dolly-in on the product, soft golden-hour light, shallow depth of field.' },
+      { label: 'Voice-over for an ad', tool: 'keou_text_to_speech', prompt: 'Made for those who notice the details. Engineered for those who don\'t.', voice: 'Adam' },
+      { label: 'Foley / SFX for a video', tool: 'keou_generate_sfx', prompt: 'Soft camera shutter click followed by a single film advance.' },
+      { label: 'Upscale finished image to 4K', tool: 'keou_upscale_image', requires: 'imageUrl + scale: 4' },
+    ],
+
     keyConcepts: [
-      {
-        name: 'Generate vs Polish vs Remix vs Adapt',
-        detail: 'Generate makes a new image from a prompt (or prompt + reference). Polish cleans up an existing image without changing it. Remix re-imagines an existing image with new direction. Adapt re-frames an existing image to a different aspect ratio.',
-      },
-      {
-        name: 'Resolution: 2K vs 4K',
-        detail: '2K is the default — fast, cheap, looks great on screen. 4K costs more but is print-ready. Use 4K only when you need it.',
-      },
-      {
-        name: 'Aspect ratios',
-        detail: '1:1 (Instagram square), 9:16 (Stories / Reels / TikTok), 16:9 (banners / video), 4:3 / 3:4 (classic photo). Adapt is the fastest way to make all formats from one source.',
-      },
-      {
-        name: 'Async by design',
-        detail: 'Generation takes 10–60 seconds. Every tool returns a taskId — call keou_get_status with the same provider/taskId to check progress. The assistant should poll automatically.',
-      },
+      { name: 'Generate vs Polish vs Remix vs Adapt', detail: 'Generate creates new from a prompt (± reference). Polish cleans up an existing image without changing it. Remix re-imagines with new direction. Adapt re-frames into a new aspect ratio.' },
+      { name: 'Resolution: 2K vs 4K', detail: '2K is the default — fast, cheap, looks great on screen. 4K costs more but is print-ready. Use 4K only when needed.' },
+      { name: 'Aspect ratios', detail: '1:1 (IG square), 9:16 (Stories / Reels / TikTok), 16:9 (banners / video), 4:3 / 3:4 (classic photo). Adapt is the fastest way to make all formats from one source.' },
+      { name: 'Async by design', detail: 'Generation takes 10–60 seconds. Every tool returns a taskId — call keou_get_status with the same provider/taskId to retrieve. The assistant should poll automatically.' },
+      { name: 'Inline rendering', detail: 'When ready, images and audio render directly in this chat — no clicking links. Videos render as a clickable URL (MCP has no native video block yet).' },
     ],
 
     proTips: [
       'Be specific in prompts: subject + setting + lighting + mood + style. Vague prompts give vague results.',
-      'For brand consistency across multiple images, describe your color palette, lighting style, and composition rules in every prompt.',
+      'For brand consistency, describe your color palette, lighting style, and composition rules in every prompt.',
       'Use polish before remix when your starting image is rough — better source = better remix.',
-      'Pack of 30 variants from one source is a Keou Pro feature ($19/mo) — saves ~25h vs doing it manually.',
+      'Pair generate_image + generate_video + text_to_speech to make a full ad creative in one chat.',
+      'Pack of 30 variants from one source is a Keou Pro feature ($19/mo) — saves ~25h per pack vs doing it manually.',
     ],
 
     cost: {
-      heading: 'What it costs (you pay KIE.AI / FAL.AI directly, no Keou markup)',
+      heading: 'What it costs (you pay KIE.AI directly, no Keou markup on the free MCP)',
       bullets: [
-        'Image gen / polish / remix / adapt: ~$0.04–0.10 per image (2K), ~$0.20–0.30 (4K)',
-        'Video (Veo 3.1 fast): ~$0.40 per second of video',
-        'Upscale (FAL clarity-upscaler): ~$0.05 per image',
+        'Image — generate / polish / remix / adapt: $0.09 per image (2K), more for 4K',
+        'Image upscale (Topaz): $0.12 per image',
+        'Video — Veo 3.1: ~$0.25 per second (fast variant cheaper). 5-second clip ≈ $1.25',
+        'Video upscale (Topaz): $0.70 per video',
+        'Voice-over (TTS): $0.05 per generation',
+        'Sound effect (SFX): $0.05 per generation',
       ],
-      note: 'KIE.AI gives free credits on signup. The maintainer earns a 15% referral commission on your first 30 days through https://kie.ai?ref=ec0e98ef53c18d6f13f05629a9ffd793 — that\'s how this stays free open source.',
+      note: 'KIE.AI gives free credits on signup. The maintainer earns a 15% referral commission on referred users\' first 30 days through https://kie.ai?ref=ec0e98ef53c18d6f13f05629a9ffd793 — that\'s how this open-source project funds itself.',
     },
 
     nextSteps: {
-      heading: 'When you outgrow single images',
-      pro: 'Keou Pro ($19/mo) unlocks: pack_30_variants (one source → 30 ad-ready format variants in parallel), brand_kit_apply (auto-apply your brand colors/fonts/logo across every gen), persistent history, team sharing. https://keou.systems/pro',
-      agency: 'For studios going white-label for clients: Keou Agency tier ($499/mo) deploys Keou under your brand. Contact k.wahuzuepro@gmail.com.',
+      heading: 'When single-asset workflows aren\'t enough',
+      pro: 'Keou Pro ($19/mo) unlocks: pack_30_variants (one source → 30 ad-ready format variants in parallel), brand_kit_apply (auto-apply your brand system to every gen), persistent history, team sharing. → https://keou.systems/pro',
+      agency: 'For studios deploying Keou under their own brand for clients: Keou Agency tier ($499/mo). Industrialize visual content production for an agency or in-house creative team. Contact k.wahuzuepro@gmail.com.',
     },
 
-    assistantInstructions: 'After showing this guide, pick ONE example matching what the user seems to want (or ask if unclear), and offer to run it now. Don\'t lecture — be a friendly assistant. The user just installed something and wants to feel the magic immediately.',
+    assistantInstructions: 'IMPORTANT — be like a great Apple Genius bar employee, not a bot. Don\'t dump this whole guide on the user. Ask them what they\'re trying to make (a product photo? an ad? a voice-over for a reel?) and pick ONE matching example to run together. Walk them through it, show the output inline, then ask what\'s next. Patience over thoroughness.',
   }),
 
   keou_generate_image: async ({ prompt, sourceImageUrl, aspectRatio = '1:1', resolution = '2K' }) => {
@@ -660,10 +742,27 @@ const HANDLERS = {
   },
 
   keou_upscale_image: async ({ imageUrl, scale = 2 }) => {
-    if (!CFG.falKey) {
-      throw new Error(`Upscale runs on FAL.AI (clarity-upscaler). Set FAL_API_KEY — sign up at ${SIGNUP_FAL}.`);
-    }
-    return falSubmit({ model: FAL_DEFAULTS.upscale, input: { image_url: imageUrl, upscale_factor: scale } });
+    if (!CFG.kieKey) throw new Error(`Upscale requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+    if (!imageUrl) throw new Error('imageUrl required');
+    return kieUpscaleImage({ imageUrl, upscaleFactor: scale });
+  },
+
+  keou_upscale_video: async ({ videoUrl, scale = 2 }) => {
+    if (!CFG.kieKey) throw new Error(`Video upscale requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+    if (!videoUrl) throw new Error('videoUrl required');
+    return kieUpscaleVideo({ videoUrl, upscaleFactor: scale });
+  },
+
+  keou_text_to_speech: async ({ text, voice = 'Rachel', stability, similarityBoost, style, speed }) => {
+    if (!CFG.kieKey) throw new Error(`TTS requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+    if (!text?.trim()) throw new Error('text required');
+    return kieTts({ text, voice, stability, similarityBoost, style, speed });
+  },
+
+  keou_generate_sfx: async ({ text, durationSeconds }) => {
+    if (!CFG.kieKey) throw new Error(`SFX requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+    if (!text?.trim()) throw new Error('text required (describe the sound)');
+    return kieSfx({ text, durationSeconds });
   },
 
   keou_get_status: async ({ taskId, provider, model }) => {
@@ -800,4 +899,4 @@ const have = [];
 if (CFG.kieKey) have.push('KIE');
 if (CFG.falKey) have.push('FAL');
 if (CFG.keouKey) have.push('Keou Pro');
-process.stderr.write(`[keou-mcp v0.6.0] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
+process.stderr.write(`[keou-mcp v0.7.0] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
