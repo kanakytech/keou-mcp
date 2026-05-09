@@ -49,9 +49,12 @@ You don't run any commands yourself. You just paste your KIE.AI key when Claude 
 ## Manual install (if you prefer the CLI directly)
 
 ```bash
-claude mcp add keou --scope user -- npx -y github:kanakytech/keou-mcp
-claude mcp env set keou KIE_API_KEY=your-key-here
+claude mcp add keou --scope user -e KIE_API_KEY=your-key-here -- npx -y github:kanakytech/keou-mcp
 ```
+
+> The API key must be passed at install time via `-e` — `claude mcp env set` does not exist as a command. To change the key later, remove and re-add: `claude mcp remove keou -s user && claude mcp add keou --scope user -e KIE_API_KEY=new-key -- npx -y github:kanakytech/keou-mcp`.
+
+Verify with `claude mcp get keou` — should show `Status: ✓ Connected`.
 
 Restart Claude Code. Run `/mcp` — you should see 10 `keou_*` tools.
 

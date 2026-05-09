@@ -5,6 +5,22 @@ All notable changes to keou-mcp documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-05-09
+
+### Fixed
+- Install flow no longer references the non-existent `claude mcp env set`
+  command (Claude Code returns `error: unknown command 'env'`). Reordered
+  steps so the user provides their KIE.AI key BEFORE the install, then
+  the key is passed at install time via `-e KIE_API_KEY=<key>`.
+- Added a fallback path for users who already installed Keou without a
+  key (or with a wrong one): `claude mcp remove keou -s user && claude
+  mcp add keou --scope user -e KIE_API_KEY=<key> -- npx -y github:kanakytech/keou-mcp`.
+- Added a verification step (`claude mcp get keou`) to confirm
+  `Status: ✓ Connected` before restarting.
+- Updated atc.js (the install-prompt source of truth synced across
+  keou-site and keou-agency landings), INSTALL_PROMPT.md, and the
+  manual-install section of the README.
+
 ## [0.5.0] — 2026-05-09
 
 ### Changed (BREAKING for tool inputs)

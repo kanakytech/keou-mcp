@@ -697,4 +697,4 @@ const have = [];
 if (CFG.kieKey) have.push('KIE');
 if (CFG.falKey) have.push('FAL');
 if (CFG.keouKey) have.push('Keou Pro');
-process.stderr.write(`[keou-mcp v0.5.0] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
+process.stderr.write(`[keou-mcp v0.5.1] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
