@@ -314,18 +314,29 @@ const TOOLS = [
   // ─── PREMIUM (Keou Pro) — funnel toward https://keou.systems/pro ────────
   {
     name: 'keou_pack_30_variants',
-    description: 'PREMIUM. Fan one source image into 30 format-perfect variants in parallel (Instagram square, story, reel, TikTok, ad creative, banners, etc.) — what would take 25 hours by hand. Requires a Keou Pro account ($19/mo, 15 free generations to start). Run this tool to learn more.',
+    description: 'PREMIUM. Fan a completed source generation into N format-perfect variants in parallel (Instagram square, story, reel, TikTok, ad creative, banners). Requires a Keou Pro account ($19/mo, 15 free generations to start). FLOW: 1) call keou_generate_image, 2) poll keou_get_status until ready, 3) pass that generationId here as sourceGenerationId. Returns a packId — poll keou_pack_status.',
     inputSchema: {
       type: 'object',
+      required: ['sourceGenerationId'],
       properties: {
-        sourceImageUrl: { type: 'string' },
-        packType: { type: 'string', enum: ['lifestyle', 'studio', 'social', 'ads'] },
+        sourceGenerationId: { type: 'integer', description: 'ID of a completed generation from keou_generate_image (in the user\'s Keou account).' },
+        packType: { type: 'string', enum: ['lifestyle', 'studio', 'social', 'ads'], description: 'Default "lifestyle".' },
+        projectId: { type: 'integer', description: 'Optional project to attach the pack to.' },
       },
     },
   },
   {
+    name: 'keou_pack_status',
+    description: 'PREMIUM. Poll an export pack. Returns aggregate progress { total, ready, failed, done } plus per-item URLs as they complete.',
+    inputSchema: {
+      type: 'object',
+      required: ['packId'],
+      properties: { packId: { type: 'string' } },
+    },
+  },
+  {
     name: 'keou_brand_kit_apply',
-    description: 'PREMIUM. Apply your brand colors, fonts, logo placement, and style across all generations automatically. Requires Keou Pro.',
+    description: 'PREMIUM (v0.5 — preview). Apply your brand colors, fonts, logo placement, and style across all generations automatically. Currently returns a coming-soon notice; pass brand details in your prompt as a workaround.',
     inputSchema: {
       type: 'object',
       properties: { brandKitId: { type: 'string' } },
@@ -427,8 +438,11 @@ const HANDLERS = {
     throw new Error('provider must be "kie", "kie-veo", or "fal"');
   },
 
-  // ─── PREMIUM stubs (funnel) ─────────────────────────────────────────────
-  keou_pack_30_variants: async () => {
+  // ─── PREMIUM (Keou Pro) ────────────────────────────────────────────────
+  // Both call the Keou agency API. The agency enforces the Pro plan check
+  // server-side via requirePro middleware, so a free user with a valid
+  // keouKey but no active Pro subscription gets a 402 with upgradeUrl.
+  keou_pack_30_variants: async ({ sourceImageUrl, packType = 'lifestyle', sourceGenerationId, projectId }) => {
     if (!CFG.keouKey) {
       return {
         locked: true,
@@ -439,8 +453,35 @@ const HANDLERS = {
         howToUnlock: `1. Sign up at ${SIGNUP_KEOU}\n2. Create an API key in your dashboard\n3. Add KEOU_API_KEY to your .mcp.json env block\n4. Restart Claude`,
       };
     }
-    // TODO Phase 2: implement real call to Keou agency /api/pack
-    return { locked: false, todo: 'Premium pack generation will call Keou agency API in Phase 2.' };
+    // Source must already be a completed generation in the user's Keou account.
+    // Front-end flow: user calls keou_generate_image first → gets generationId,
+    // waits until ready → passes that ID here.
+    if (!sourceGenerationId) {
+      throw new Error('sourceGenerationId is required — first call keou_generate_image, then poll keou_get_status until ready, then pass that generationId here.');
+    }
+    const body = { sourceGenerationId, packId: packType, projectId };
+    const res = await fetch(`${CFG.keouUrl}/api/pack`, {
+      method: 'POST',
+      headers: { 'authorization': `Bearer ${CFG.keouKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (res.status === 402) {
+      return { locked: true, reason: json.error, upgradeUrl: json.upgradeUrl || SIGNUP_KEOU };
+    }
+    if (!res.ok) throw new Error(`Keou ${res.status}: ${json?.error || 'pack creation failed'}`);
+    return { ...json, _hint: 'Poll keou_pack_status with the returned packId until done.' };
+  },
+
+  keou_pack_status: async ({ packId }) => {
+    if (!CFG.keouKey) throw new Error('Keou Pro key required for pack status. Sign up: ' + SIGNUP_KEOU);
+    if (!packId) throw new Error('packId required');
+    const res = await fetch(`${CFG.keouUrl}/api/pack/${encodeURIComponent(packId)}/status`, {
+      headers: { 'authorization': `Bearer ${CFG.keouKey}` },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(`Keou ${res.status}: ${json?.error || 'status failed'}`);
+    return json;
   },
 
   keou_brand_kit_apply: async () => {
@@ -451,7 +492,12 @@ const HANDLERS = {
         upgradeUrl: SIGNUP_KEOU,
       };
     }
-    return { locked: false, todo: 'Brand kit will call Keou agency API in Phase 2.' };
+    // Coming in v0.5 — endpoint not yet exposed by the agency.
+    return {
+      comingSoon: true,
+      eta: 'v0.5',
+      currentWorkaround: 'Pass your brand colors / fonts as part of the prompt for now.',
+    };
   },
 };
 
@@ -484,4 +530,4 @@ const have = [];
 if (CFG.kieKey) have.push('KIE');
 if (CFG.falKey) have.push('FAL');
 if (CFG.keouKey) have.push('Keou Pro');
-process.stderr.write(`[keou-mcp v0.3.0] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
+process.stderr.write(`[keou-mcp v0.4.0] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
