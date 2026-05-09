@@ -53,10 +53,10 @@ async function saveConfig(patch) {
 }
 
 // ─── Provider signup URLs ──────────────────────────────────────────────────
-// Plain URLs — partner referral params can be appended via env override
-// (KIE_SIGNUP_URL / FAL_SIGNUP_URL) so contributors don't have to fork to
-// monetize their own deployments.
-const SIGNUP_KIE  = process.env.KIE_SIGNUP_URL  || 'https://kie.ai';
+// Default URLs include the maintainer's referral params — funds ongoing
+// development. Forks can override via env (KIE_SIGNUP_URL / FAL_SIGNUP_URL /
+// KEOU_SIGNUP_URL) to plug their own referral codes without editing the source.
+const SIGNUP_KIE  = process.env.KIE_SIGNUP_URL  || 'https://kie.ai?ref=ec0e98ef53c18d6f13f05629a9ffd793';
 const SIGNUP_FAL  = process.env.FAL_SIGNUP_URL  || 'https://fal.ai';
 const SIGNUP_KEOU = process.env.KEOU_SIGNUP_URL || 'https://keou.systems/pro';
 
@@ -484,4 +484,4 @@ const have = [];
 if (CFG.kieKey) have.push('KIE');
 if (CFG.falKey) have.push('FAL');
 if (CFG.keouKey) have.push('Keou Pro');
-process.stderr.write(`[keou-mcp v0.2.1] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
+process.stderr.write(`[keou-mcp v0.3.0] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);

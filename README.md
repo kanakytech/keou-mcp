@@ -57,7 +57,7 @@ Restart Claude. Run `/mcp` to see the 9 tools. Done.
 
 | Provider | Best for | Cost | Free credits | Sign up |
 |---|---|---|---|---|
-| **KIE.AI** | Cheapest, fastest. Default. | ~$0.04/image (nano-banana) | Yes | [kie.ai](https://kie.ai) |
+| **KIE.AI** | Cheapest, fastest. Default. | ~$0.04/image (nano-banana) | Yes | [kie.ai](https://kie.ai?ref=ec0e98ef53c18d6f13f05629a9ffd793) |
 | **FAL.AI** | Premium quality (Flux Pro). | ~$0.10/image | Yes | [fal.ai](https://fal.ai) |
 | **Keou Pro** *(optional)* | Batch packs (30 variants), brand kit, history | $19/mo, 15 free generations | Yes | [keou.systems/pro](https://keou.systems/pro) |
 
