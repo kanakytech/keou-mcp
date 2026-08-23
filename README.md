@@ -165,7 +165,7 @@ A free Keou Studio account is what you add when single-asset workflows aren't en
 - **Brand kit auto-apply** — colors, fonts, logo placement enforced server-side
 - **Persistent history** — every asset saved, taggable, fork-able
 - **Team workspaces** — share an API key, track per-seat usage
-- **White-label option** — agencies can deploy Keou under their own brand for clients (Agency tier, $499/mo)
+- **Custom builds** — 3D, music, audio, editing, VFX, integrations, deployment under your own brand. Scoped per project, fixed price in writing before anything starts: [kevyn@kanaky.xyz](mailto:kevyn@kanaky.xyz)
 
 [Create a free account](https://studio.kanaky.xyz) · [Read the docs](https://studio.kanaky.xyz/docs.html)
 
