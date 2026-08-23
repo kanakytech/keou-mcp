@@ -27,7 +27,7 @@ You ──► Claude ──► keou-mcp ──► KIE.AI / FAL.AI ──► desi
 | *"Upscale this to 4K for print"* | FAL clarity-upscaler 2x or 4x |
 | *"Generate a 9:16 vertical video with a slow zoom"* | KIE.AI Veo 3.1 image-to-video |
 
-10 tools. Smart routing. BYOK (Bring Your Own Key) — no Keou account needed for the basics.
+Sixteen tools. Smart routing. BYOK (bring your own key) — no Keou account needed for the basics.
 
 ---
 
@@ -56,7 +56,7 @@ claude mcp add keou --scope user -e KIE_API_KEY=your-key-here -- npx -y github:k
 
 Verify with `claude mcp get keou` — should show `Status: ✓ Connected`.
 
-Restart Claude Code. Run `/mcp` — you should see 10 `keou_*` tools.
+Restart Claude Code. Run `/mcp` — you should see the `keou_*` tools listed.
 
 For Claude Desktop, paste this into `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
