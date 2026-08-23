@@ -69,7 +69,7 @@ Test against your Claude client by adding to `.mcp.json`:
 ## Affiliate / referral disclaimer
 
 The default signup URLs in `server.js` include the maintainer's affiliate
-referral codes (KIE.AI, FAL.AI). This funds ongoing development. Forks and
+referral code (KIE.AI — the FAL.AI link carries none). This funds ongoing development. Forks and
 self-hosted deployments can override via env vars (`KIE_SIGNUP_URL` etc.) —
 contributors are explicitly free to keep their own referral revenue when
 running their own deployments.

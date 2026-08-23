@@ -9,7 +9,7 @@
  * espace où ranger la génération source, pas parce qu'ils sont réservés.
  *
  * Config: env vars in .mcp.json, or fallback ~/.keou-mcp/config.json
- *   KIE_API_KEY        — sign up at https://kie.ai
+ *   KIE_API_KEY        — sign up at https://kie.ai?ref=ec0e98ef53c18d6f13f05629a9ffd793
  *   FAL_API_KEY        — sign up at https://fal.ai
  *   KEOU_API_KEY       — optional, for pack/brand-kit tools (free account:
  *                        https://studio.kanaky.xyz)

@@ -15,7 +15,7 @@ startCommand:
       kieKey:
         type: string
         title: KIE.AI API key
-        description: "Get one free at https://kie.ai (default provider, cheapest)."
+        description: "Get one free at https://kie.ai?ref=ec0e98ef53c18d6f13f05629a9ffd793 (default provider, cheapest)."
       falKey:
         type: string
         title: FAL.AI API key
