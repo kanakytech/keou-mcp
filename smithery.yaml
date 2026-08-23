@@ -10,7 +10,7 @@ startCommand:
     description: |
       Bring Your Own Key. KIE.AI is the cheapest provider (~$0.04/img, signup gives free credits).
       FAL.AI is optional for premium quality (Flux Pro) and image upscaling.
-      Keou Pro key is optional and unlocks pack_30_variants + brand_kit_apply.
+      The Keou Studio key is optional (free account) and enables pack_variants + brand_kit_apply.
     properties:
       kieKey:
         type: string
@@ -22,8 +22,8 @@ startCommand:
         description: "Optional. For premium quality (Flux) and clarity-upscaler. Get at https://fal.ai."
       keouKey:
         type: string
-        title: Keou Pro API key
-        description: "Optional. Unlocks pack_30_variants + brand_kit_apply. Get at https://keou.systems/pro."
+        title: Keou Studio API key
+        description: "Optional, and free. Enables pack_variants + brand_kit_apply. Create an account at https://studio.kanaky.xyz."
   commandFunction: |
     (config) => ({
       command: 'node',

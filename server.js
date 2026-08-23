@@ -3,14 +3,17 @@
  * Keou MCP — open-source bridge between Claude (Code/Desktop) and the best
  * AI image/video providers (KIE.AI, FAL.AI). Bring Your Own Key.
  *
- * Free tier   : 6 tools (BYOK direct to providers)
- * Premium tier: keou_pack, keou_brand_kit (require Keou Pro account)
+ * Un seul palier. Tous les outils sont ouverts : vous apportez votre clé
+ * fournisseur, vous payez le fournisseur. Les outils « pack » et « brand kit »
+ * passent par un compte Keou Studio — gratuit — parce qu'ils ont besoin d'un
+ * espace où ranger la génération source, pas parce qu'ils sont réservés.
  *
  * Config: env vars in .mcp.json, or fallback ~/.keou-mcp/config.json
  *   KIE_API_KEY        — sign up at https://kie.ai
  *   FAL_API_KEY        — sign up at https://fal.ai
- *   KEOU_API_KEY       — optional, unlocks premium tools (https://keou.systems/pro)
- *   KEOU_API_URL       — optional, default https://keou-agency.up.railway.app
+ *   KEOU_API_KEY       — optional, for pack/brand-kit tools (free account:
+ *                        https://studio.kanaky.xyz)
+ *   KEOU_API_URL       — optional, default https://studio.kanaky.xyz
  */
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -41,7 +44,7 @@ function loadConfig() {
     kieKey:  process.env.KIE_API_KEY  || fileCfg.kieKey  || null,
     falKey:  process.env.FAL_API_KEY  || fileCfg.falKey  || null,
     keouKey: process.env.KEOU_API_KEY || fileCfg.keouKey || null,
-    keouUrl: (process.env.KEOU_API_URL || fileCfg.keouUrl || 'https://keou-agency.up.railway.app').replace(/\/$/, ''),
+    keouUrl: (process.env.KEOU_API_URL || fileCfg.keouUrl || 'https://studio.kanaky.xyz').replace(/\/$/, ''),
   };
 }
 let CFG = loadConfig();
@@ -59,7 +62,7 @@ async function saveConfig(patch) {
 // KEOU_SIGNUP_URL) to plug their own referral codes without editing the source.
 const SIGNUP_KIE  = process.env.KIE_SIGNUP_URL  || 'https://kie.ai?ref=ec0e98ef53c18d6f13f05629a9ffd793';
 const SIGNUP_FAL  = process.env.FAL_SIGNUP_URL  || 'https://fal.ai';
-const SIGNUP_KEOU = process.env.KEOU_SIGNUP_URL || 'https://keou.systems/pro';
+const SIGNUP_KEOU = process.env.KEOU_SIGNUP_URL || 'https://studio.kanaky.xyz/login.html?signup=1';
 
 // ─── Inline rendering helpers ───────────────────────────────────────────────
 // MCP supports `image` and `audio` content blocks — base64 payload + MIME type.
@@ -578,10 +581,10 @@ const TOOLS = [
     },
   },
 
-  // ─── PREMIUM (Keou Pro) — funnel toward https://keou.systems/pro ────────
+  // ─── Outils passant par un compte Keou Studio (gratuit) ────────────────
   {
-    name: 'keou_pack_30_variants',
-    description: 'PREMIUM. Fan a completed source generation into N format-perfect variants in parallel (Instagram square, story, reel, TikTok, ad creative, banners). Requires a Keou Pro account ($19/mo, 15 free generations to start). FLOW: 1) call keou_generate_image, 2) poll keou_get_status until ready, 3) pass that generationId here as sourceGenerationId. Returns a packId — poll keou_pack_status.',
+    name: 'keou_pack_variants',
+    description: 'Fan a completed source generation into format-perfect variants in parallel (Instagram square, story, reel, TikTok, ad creative, banners). Three presets ship — 1, 4 and 8 formats depending on packType; the list lives in src/lib/packs.js on the server and is trivially extended. Needs a free Keou Studio account (studio.kanaky.xyz), because the source generation has to live somewhere. FLOW: 1) call keou_generate_image, 2) poll keou_get_status until ready, 3) pass that generationId here as sourceGenerationId. Returns a packId — poll keou_pack_status.',
     inputSchema: {
       type: 'object',
       required: ['sourceGenerationId'],
@@ -594,7 +597,7 @@ const TOOLS = [
   },
   {
     name: 'keou_pack_status',
-    description: 'PREMIUM. Poll an export pack. Returns aggregate progress { total, ready, failed, done } plus per-item URLs as they complete.',
+    description: 'Poll an export pack. Returns aggregate progress { total, ready, failed, done } plus per-item URLs as they complete.',
     inputSchema: {
       type: 'object',
       required: ['packId'],
@@ -603,7 +606,7 @@ const TOOLS = [
   },
   {
     name: 'keou_brand_kit_apply',
-    description: 'PREMIUM (v0.5 — preview). Apply your brand colors, fonts, logo placement, and style across all generations automatically. Currently returns a coming-soon notice; pass brand details in your prompt as a workaround.',
+    description: 'Preview (v0.5). Apply your brand colors, fonts, logo placement, and style across all generations automatically. Currently returns a coming-soon notice; pass brand details in your prompt as a workaround.',
     inputSchema: {
       type: 'object',
       properties: { brandKitId: { type: 'string' } },
@@ -639,10 +642,10 @@ const HANDLERS = {
           freeCredits: 'Yes, on signup',
         },
       },
-      premiumUpgrade: {
-        what: 'Keou Pro: batch packs (30 variants from 1 source), brand kit, history, team sharing',
+      keouAccount: {
+        what: 'A free Keou Studio account adds batch packs, brand kit, persistent history and team sharing. There is no paid tier — the whole studio is MIT open source.',
         signup: SIGNUP_KEOU,
-        pricing: '$19/mo — 15 free generations to start',
+        pricing: 'Free. The account costs nothing and the studio is MIT open source — you only pay your provider.',
       },
     };
   },
@@ -657,12 +660,12 @@ const HANDLERS = {
         'keou_generate_video', 'keou_upscale_image', 'keou_upscale_video',
         'keou_text_to_speech', 'keou_generate_sfx', 'keou_get_status', 'keou_welcome',
       ] : []),
-      ...(CFG.keouKey ? ['keou_pack_30_variants', 'keou_pack_status', 'keou_brand_kit_apply'] : []),
+      ...(CFG.keouKey ? ['keou_pack_variants', 'keou_pack_status', 'keou_brand_kit_apply'] : []),
     ],
     suggestion: !CFG.kieKey
       ? `No KIE.AI key set. Run keou_setup, or sign up at ${SIGNUP_KIE}.`
       : !CFG.keouKey
-      ? `Pro tip: unlock batch packs (30 variants in parallel) → ${SIGNUP_KEOU}`
+      ? `Tip: a free Keou Studio account adds batch packs and brand kit → ${SIGNUP_KEOU}`
       : 'All tiers unlocked.',
   }),
 
@@ -695,10 +698,10 @@ const HANDLERS = {
           { tool: 'keou_generate_sfx', usage: 'Short sound effect from a text description (e.g. "soft camera shutter click", "champagne pop", "rain on window").', model: 'ElevenLabs Sound Effects v2' },
         ],
       },
-      premium: {
-        heading: 'Premium (require Keou Pro account)',
+      withAccount: {
+        heading: 'Tools that use a free Keou Studio account',
         tools: [
-          { tool: 'keou_pack_30_variants', usage: 'Fan one finished source image into 30 format-perfect variants in parallel — IG square, story, reel, TikTok, banners, ad creatives. Saves ~25h of manual reformatting per pack.' },
+          { tool: 'keou_pack_variants', usage: 'Fan one finished source image into format-perfect variants in parallel — IG square, story, reel, TikTok, banners, ad creatives. Saves ~25h of manual reformatting per pack.' },
           { tool: 'keou_brand_kit_apply', usage: 'Auto-apply brand colors, fonts, logo, voice across every gen. (v0.5 preview — pass brand details in prompts as a workaround for now.)' },
         ],
       },
@@ -729,7 +732,7 @@ const HANDLERS = {
       'For brand consistency, describe your color palette, lighting style, and composition rules in every prompt.',
       'Use polish before remix when your starting image is rough — better source = better remix.',
       'Pair generate_image + generate_video + text_to_speech to make a full ad creative in one chat.',
-      'Pack of 30 variants from one source is a Keou Pro feature ($19/mo) — saves ~25h per pack vs doing it manually.',
+      'One approved source fanned into a whole delivery pack saves hours of manual resizing — call keou_pack_variants once the source is ready.',
     ],
 
     cost: {
@@ -747,8 +750,8 @@ const HANDLERS = {
 
     nextSteps: {
       heading: 'When single-asset workflows aren\'t enough',
-      pro: 'Keou Pro ($19/mo) unlocks: pack_30_variants (one source → 30 ad-ready format variants in parallel), brand_kit_apply (auto-apply your brand system to every gen), persistent history, team sharing. → https://keou.systems/pro',
-      agency: 'For studios deploying Keou under their own brand for clients: Keou Agency tier ($499/mo). Industrialize visual content production for an agency or in-house creative team. Contact k.wahuzuepro@gmail.com.',
+          keou: 'A free Keou Studio account unlocks keou_pack_variants (one source fanned into a delivery pack), keou_brand_kit_apply, persistent history and team sharing. Everything is MIT open source — self-host it or use studio.kanaky.xyz. → https://studio.kanaky.xyz',
+          custom: 'Need something the public build does not do — 3D, music, audio, editing, VFX, or wiring into your own systems? That is built to order. → kevyn@kanaky.xyz',
     },
 
     assistantInstructions: 'IMPORTANT — be like a great Apple Genius bar employee, not a bot. Don\'t dump this whole guide on the user. Ask them what they\'re trying to make (a product photo? an ad? a voice-over for a reel?) and pick ONE matching example to run together. Walk them through it, show the output inline, then ask what\'s next. Patience over thoroughness.',
@@ -845,19 +848,19 @@ const HANDLERS = {
     });
   },
 
-  // ─── PREMIUM (Keou Pro) ────────────────────────────────────────────────
+  // ─── Outils passant par un compte Keou Studio ──────────────────────────────
   // Both call the Keou agency API. The agency enforces the Pro plan check
   // server-side via requirePro middleware, so a free user with a valid
   // keouKey but no active Pro subscription gets a 402 with upgradeUrl.
-  keou_pack_30_variants: async ({ sourceImageUrl, packType = 'lifestyle', sourceGenerationId, projectId }) => {
+  keou_pack_variants: async ({ sourceImageUrl, packType = 'lifestyle', sourceGenerationId, projectId }) => {
     if (!CFG.keouKey) {
       return {
         locked: true,
-        feature: 'Pack of 30 format-perfect variants from a single source image',
+        feature: 'A delivery pack of format-perfect variants from a single source image',
         savesYou: '~25 hours of manual editing per pack',
         upgradeUrl: SIGNUP_KEOU,
-        pricing: '$19/mo — 15 free generations to start',
-        howToUnlock: `1. Sign up at ${SIGNUP_KEOU}\n2. Create an API key in your dashboard\n3. Add KEOU_API_KEY to your .mcp.json env block\n4. Restart Claude`,
+        pricing: 'Free. The account costs nothing and the studio is MIT open source — you only pay your provider.',
+        howToUnlock: `1. Create a free account at ${SIGNUP_KEOU}\n2. Create an API key in your dashboard\n3. Add KEOU_API_KEY to your .mcp.json env block\n4. Restart Claude`,
       };
     }
     // Source must already be a completed generation in the user's Keou account.
@@ -881,7 +884,7 @@ const HANDLERS = {
   },
 
   keou_pack_status: async ({ packId }) => {
-    if (!CFG.keouKey) throw new Error('Keou Pro key required for pack status. Sign up: ' + SIGNUP_KEOU);
+    if (!CFG.keouKey) throw new Error('A Keou Studio account is needed for pack status (free). Sign up: ' + SIGNUP_KEOU);
     if (!packId) throw new Error('packId required');
     const res = await fetch(`${CFG.keouUrl}/api/pack/${encodeURIComponent(packId)}/status`, {
       headers: { 'authorization': `Bearer ${CFG.keouKey}` },
@@ -920,6 +923,12 @@ const HANDLERS = {
     };
   },
 };
+
+
+// Rétro-compatibilité : l'outil s'appelait keou_pack_30_variants. Le nom
+// promettait trente variantes quand le serveur en livre huit au maximum, il a
+// donc changé — mais les installations déjà en place appellent encore l'ancien.
+HANDLERS.keou_pack_30_variants = HANDLERS.keou_pack_variants;
 
 // ─── MCP wiring ─────────────────────────────────────────────────────────────
 
@@ -978,5 +987,5 @@ await server.connect(transport);
 const have = [];
 if (CFG.kieKey) have.push('KIE');
 if (CFG.falKey) have.push('FAL');
-if (CFG.keouKey) have.push('Keou Pro');
+if (CFG.keouKey) have.push('Keou Studio');
 process.stderr.write(`[keou-mcp v0.7.0] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);

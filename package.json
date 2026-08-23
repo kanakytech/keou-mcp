@@ -1,6 +1,6 @@
 {
   "name": "keou-mcp",
-  "version": "0.8.0",
+  "version": "0.4.2",
   "description": "MCP server bridging Claude (Code/Desktop) to KIE.AI + FAL.AI — generate product visuals from any chat. BYOK.",
   "keywords": [
     "mcp",
@@ -13,10 +13,10 @@
     "fal",
     "keou"
   ],
-  "homepage": "https://github.com/kanakytech/keou-mcp",
+  "homepage": "https://studio.kanaky.xyz",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kanakytech/keou-mcp.git"
+    "url": "https://github.com/kanakytech/keou-mcp"
   },
   "bugs": "https://github.com/kanakytech/keou-mcp/issues",
   "license": "MIT",
@@ -33,7 +33,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
-    "sharp": "^0.34.5"
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "sharp": "^0.35.3"
   }
 }

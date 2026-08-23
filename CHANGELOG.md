@@ -5,6 +5,26 @@ All notable changes to keou-mcp documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] — 2026-08-24
+
+### Changed — le palier payant n'existe plus
+
+Keou Studio est passé entièrement open source sous MIT et sa licence à
+1 499 USD a été supprimée. Ce MCP en portait encore l'entonnoir : il vendait un
+« Keou Pro » à 19 USD/mois vers `keou.systems/pro`, un domaine mort depuis le
+13 août, et verrouillait `pack_30_variants` derrière une clé payante.
+
+- Toutes les mentions « PREMIUM » et « Keou Pro » retirées du code, des
+  descriptions d'outils, du README et de `smithery.yaml`.
+- `keou.systems` → `studio.kanaky.xyz` partout. L'URL d'API par défaut passe de
+  `keou-agency.up.railway.app` à `https://studio.kanaky.xyz`.
+- `keou_pack_30_variants` devient **`keou_pack_variants`**. L'ancien nom
+  promettait trente variantes quand le serveur en livre huit au maximum — trois
+  presets de 1, 4 et 8 formats. `HANDLERS.keou_pack_30_variants` reste comme
+  alias : les installations existantes continuent de fonctionner.
+- Le compte Keou Studio requis pour les packs et le brand kit est **gratuit**.
+  Il sert à ranger la génération source, pas à débloquer une fonctionnalité.
+
 ## [0.7.0] — 2026-05-10
 
 ### Added
