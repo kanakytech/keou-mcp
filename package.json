@@ -1,6 +1,6 @@
 {
   "name": "keou-mcp",
-  "version": "0.4.2",
+  "version": "0.8.1",
   "description": "MCP server bridging Claude (Code/Desktop) to KIE.AI + FAL.AI — generate product visuals from any chat. BYOK.",
   "keywords": [
     "mcp",
