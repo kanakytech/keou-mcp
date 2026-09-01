@@ -5,6 +5,15 @@ All notable changes to keou-mcp documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.10.0 — 2026-09-01
+
+### Added
+- **Local video** — with Wan 2.2 5B or LTX-Video 2B models installed in your
+  ComfyUI, `keou_generate_video` runs free and fully local (text-to-video and
+  image-to-video), auto-detected via `/object_info`. Without the models the
+  error lists exactly what to install. Graphs ported from the official
+  Comfy-Org workflow templates, core nodes only.
+
 ## 0.9.0 — 2026-09-01
 
 ### Added

@@ -26,6 +26,18 @@ const stub = http.createServer((req, res) => {
   if (url.pathname === '/object_info/CheckpointLoaderSimple') {
     return json({ CheckpointLoaderSimple: { input: { required: { ckpt_name: [['sdxl-test.safetensors']] } } } });
   }
+  if (url.pathname === '/object_info/UNETLoader') {
+    return json({ UNETLoader: { input: { required: { unet_name: [['wan2.2_ti2v_5B_fp16.safetensors']] } } } });
+  }
+  if (url.pathname === '/object_info/CLIPLoader') {
+    return json({ CLIPLoader: { input: { required: { clip_name: [['umt5_xxl_fp8_e4m3fn_scaled.safetensors']] } } } });
+  }
+  if (url.pathname === '/object_info/VAELoader') {
+    return json({ VAELoader: { input: { required: { vae_name: [['wan2.2_vae.safetensors']] } } } });
+  }
+  if (url.pathname === '/object_info/SaveVideo') {
+    return json({ SaveVideo: { input: { required: {} } } });
+  }
   if (url.pathname === '/prompt') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -95,10 +107,10 @@ try {
   assert.ok(blocks.some((b) => b.type === 'image' && b.data?.length > 10), `expected inline image block, got: ${JSON.stringify(blocks).slice(0, 200)}`);
   ok('keou_get_status(local) → inline image block');
 
-  const vid = await rpc('tools/call', { name: 'keou_generate_video', arguments: { prompt: 'x' } });
+  const vid = await rpc('tools/call', { name: 'keou_generate_video', arguments: { prompt: 'slow dolly-in on the bottle' } });
   const vidText = JSON.stringify(vid.result);
-  assert.ok(/KIE\.AI key/i.test(vidText), 'video without key must explain the cloud requirement');
-  ok('keou_generate_video sans clé → refus net expliqué');
+  assert.ok(/local/.test(vidText) && /e2e-1/.test(vidText), `video sans clé + modèles Wan présents doit partir en local, reçu: ${vidText.slice(0, 200)}`);
+  ok('keou_generate_video sans clé → moteur local Wan 5B');
 
   const keys = await rpc('tools/call', { name: 'keou_status_keys', arguments: {} });
   assert.ok(JSON.stringify(keys.result).includes('FREE'), 'status_keys must surface the active local engine');

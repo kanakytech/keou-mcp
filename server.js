@@ -327,6 +327,116 @@ async function comfyUpscaleImage({ imageUrl }) {
   });
 }
 
+// ── Local video — Wan 2.2 / LTX (ComfyUI core nodes, official templates) ──
+// Double gate: nodes (old installs) and, above all, MODELS. Nothing is
+// promised that the user's instance cannot actually serve.
+
+const VIDEO_NEG = 'blurry, low quality, distorted, deformed, flickering, watermark, text, static image';
+const WAN5B_DIMS = { '1:1': [768, 768], '16:9': [1280, 704], '9:16': [704, 1280], '4:3': [960, 704], '3:4': [704, 960], '21:9': [1280, 544] };
+const LTX_DIMS = { '1:1': [640, 640], '16:9': [768, 512], '9:16': [512, 768] };
+const vseed = () => Math.floor(Math.random() * 1e15);
+
+async function comfyChoices(nodeType, inputName) {
+  try {
+    const info = await comfyJson(`/object_info/${nodeType}`);
+    return info?.[nodeType]?.input?.required?.[inputName]?.[0] || [];
+  } catch { return []; }
+}
+
+let _videoEngines = { v: null, exp: 0 };
+async function detectLocalVideo() {
+  const now = Date.now();
+  if (_videoEngines.v && now < _videoEngines.exp) return _videoEngines.v;
+  const [unets, clips, vaes, ckpts, saveNode] = await Promise.all([
+    comfyChoices('UNETLoader', 'unet_name'),
+    comfyChoices('CLIPLoader', 'clip_name'),
+    comfyChoices('VAELoader', 'vae_name'),
+    comfyChoices('CheckpointLoaderSimple', 'ckpt_name'),
+    comfyJson('/object_info/SaveVideo').catch(() => ({})),
+  ]);
+  const has = (list, re) => list.find((n) => re.test(n)) || null;
+  const nodesOk = !!saveNode?.SaveVideo; // core since v0.3.34
+  const umt5 = has(clips, /umt5/i);
+  const engines = {
+    wan5b: nodesOk && has(unets, /wan2\.2.*ti2v.*5B/i) && umt5 && has(vaes, /wan2\.2_vae/i)
+      ? { unet: has(unets, /wan2\.2.*ti2v.*5B/i), clip: umt5, vae: has(vaes, /wan2\.2_vae/i) } : null,
+    ltx: nodesOk && has(ckpts, /ltx-video-2b/i) && has(clips, /t5xxl/i)
+      ? { ckpt: has(ckpts, /ltx-video-2b/i), clip: has(clips, /t5xxl/i) } : null,
+  };
+  _videoEngines = { v: engines, exp: now + 60_000 };
+  return engines;
+}
+
+async function comfyGenerateVideo({ prompt, imageUrl, aspectRatio = '16:9' }) {
+  const engines = await detectLocalVideo();
+  const engine = engines.wan5b ? 'wan5b' : engines.ltx ? 'ltx' : null;
+  if (!engine) {
+    throw new Error(
+      'Local video needs models in your ComfyUI. Easiest: Wan 2.2 5B (~17 GB, runs on 8 GB VRAM) — ' +
+      'diffusion_models/wan2.2_ti2v_5B_fp16.safetensors + text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors + vae/wan2.2_vae.safetensors ' +
+      '(see docs.comfy.org/tutorials/video/wan/wan2_2). Or use a KIE.AI key for cloud video.'
+    );
+  }
+  if (engine === 'wan5b') {
+    const e = engines.wan5b;
+    const [width, height] = WAN5B_DIMS[aspectRatio] || WAN5B_DIMS['16:9'];
+    const g = {
+      37: { class_type: 'UNETLoader', inputs: { unet_name: e.unet, weight_dtype: 'default' } },
+      38: { class_type: 'CLIPLoader', inputs: { clip_name: e.clip, type: 'wan', device: 'default' } },
+      39: { class_type: 'VAELoader', inputs: { vae_name: e.vae } },
+      48: { class_type: 'ModelSamplingSD3', inputs: { model: ['37', 0], shift: 8 } },
+      6: { class_type: 'CLIPTextEncode', inputs: { clip: ['38', 0], text: prompt || '' } },
+      7: { class_type: 'CLIPTextEncode', inputs: { clip: ['38', 0], text: VIDEO_NEG } },
+      55: { class_type: 'Wan22ImageToVideoLatent', inputs: { vae: ['39', 0], width, height, length: 121, batch_size: 1 } },
+      3: { class_type: 'KSampler', inputs: { model: ['48', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['55', 0], seed: vseed(), steps: 20, cfg: 5, sampler_name: 'uni_pc', scheduler: 'simple', denoise: 1 } },
+      8: { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['39', 0] } },
+      57: { class_type: 'CreateVideo', inputs: { images: ['8', 0], fps: 24 } },
+      58: { class_type: 'SaveVideo', inputs: { video: ['57', 0], filename_prefix: 'keou-video/keou', format: 'auto', codec: 'auto' } },
+    };
+    if (imageUrl) {
+      const name = await comfyUpload(imageUrl);
+      g[56] = { class_type: 'LoadImage', inputs: { image: name } };
+      g[55].inputs.start_image = ['56', 0];
+    }
+    return comfySubmit(g);
+  }
+  // LTX 2B — light and fast; long descriptive prompts required.
+  const e = engines.ltx;
+  const [width, height] = LTX_DIMS[aspectRatio] || LTX_DIMS['16:9'];
+  const g = {
+    44: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: e.ckpt } },
+    38: { class_type: 'CLIPLoader', inputs: { clip_name: e.clip, type: 'ltxv', device: 'default' } },
+    6: { class_type: 'CLIPTextEncode', inputs: { clip: ['38', 0], text: prompt || '' } },
+    7: { class_type: 'CLIPTextEncode', inputs: { clip: ['38', 0], text: 'low quality, worst quality, deformed, distorted, motion smear, motion artifacts' } },
+    69: { class_type: 'LTXVConditioning', inputs: { positive: ['6', 0], negative: ['7', 0], frame_rate: 25 } },
+    71: { class_type: 'LTXVScheduler', inputs: { steps: 30, max_shift: 2.05, base_shift: 0.95, stretch: true, terminal: 0.1, latent: null } },
+    73: { class_type: 'KSamplerSelect', inputs: { sampler_name: 'euler' } },
+    72: { class_type: 'SamplerCustom', inputs: { model: ['44', 0], add_noise: true, noise_seed: vseed(), cfg: 3, positive: ['69', 0], negative: ['69', 1], sampler: ['73', 0], sigmas: ['71', 0], latent_image: null } },
+    8: { class_type: 'VAEDecode', inputs: { samples: ['72', 0], vae: ['44', 2] } },
+    78: { class_type: 'CreateVideo', inputs: { images: ['8', 0], fps: 24 } },
+    79: { class_type: 'SaveVideo', inputs: { video: ['78', 0], filename_prefix: 'keou-video/keou', format: 'auto', codec: 'auto' } },
+  };
+  if (imageUrl) {
+    const name = await comfyUpload(imageUrl);
+    const info = await comfyJson('/object_info/LTXVImgToVideo').catch(() => ({}));
+    const req = info?.LTXVImgToVideo?.input?.required || {};
+    const i2v = { positive: ['6', 0], negative: ['7', 0], vae: ['44', 2], image: ['80', 0], width, height, length: 97, batch_size: 1 };
+    if ('strength' in req) i2v.strength = 1.0;
+    else if ('image_noise_scale' in req) i2v.image_noise_scale = 0.15;
+    g[80] = { class_type: 'LoadImage', inputs: { image: name } };
+    g[77] = { class_type: 'LTXVImgToVideo', inputs: i2v };
+    g[69].inputs.positive = ['77', 0];
+    g[69].inputs.negative = ['77', 1];
+    g[71].inputs.latent = ['77', 2];
+    g[72].inputs.latent_image = ['77', 2];
+  } else {
+    g[70] = { class_type: 'EmptyLTXVLatentVideo', inputs: { width, height, length: 97, batch_size: 1 } };
+    g[71].inputs.latent = ['70', 0];
+    g[72].inputs.latent_image = ['70', 0];
+  }
+  return comfySubmit(g);
+}
+
 async function comfyStatus(taskId) {
   const history = await comfyJson(`/history/${encodeURIComponent(taskId)}`);
   const entry = history?.[taskId];
@@ -673,7 +783,7 @@ const TOOLS = [
   },
   {
     name: 'keou_generate_video',
-    description: 'PRIMARY video-generation tool — use this for ANY user request to create, generate, produce or make a video / clip / animation / motion shot / B-roll / drift shot, in any language, even if the user does not mention "Keou". Powered by KIE.AI Veo 3.1. Accepts a text prompt and optionally a source image (image-to-video). After submit, IMMEDIATELY start polling keou_get_status with provider="kie-veo" in a tight loop — do NOT pause or ask the user between polls. Videos take 1–3 minutes; just keep polling.',
+    description: 'PRIMARY video-generation tool — use this for ANY user request to create, generate, produce or make a video / clip / animation / motion shot / B-roll / drift shot, in any language, even if the user does not mention "Keou". Cloud engine: KIE.AI Veo 3.1. Local engine: the user\'s own ComfyUI with Wan 2.2 or LTX-Video models (free, auto-detected) — used automatically when no KIE key is set. Accepts a text prompt and optionally a source image (image-to-video). After submit, IMMEDIATELY start polling keou_get_status with the provider from the response ("kie-veo" or "local") in a tight loop — do NOT pause or ask the user between polls. Videos take 1–3 minutes; just keep polling.',
     inputSchema: {
       type: 'object',
       required: ['prompt'],
@@ -681,7 +791,8 @@ const TOOLS = [
         prompt: { type: 'string', description: 'Describe motion, camera movement, mood. E.g. "slow zoom in on the product, soft golden light".' },
         sourceImageUrl: { type: 'string', description: 'Optional source image for image-to-video.' },
         aspectRatio: { type: 'string', enum: ['16:9', '9:16'], description: 'Default 16:9.' },
-        quality: { type: 'string', enum: ['fast', 'pro'], description: 'fast = veo3_fast (default), pro = veo3 (higher quality, slower, costs more).' },
+        quality: { type: 'string', enum: ['fast', 'pro'], description: 'fast = veo3_fast (default), pro = veo3 (higher quality, slower, costs more). Cloud engine only.' },
+        engine: { type: 'string', enum: ['auto', 'local', 'cloud'], description: 'Default auto: local (free, own ComfyUI with Wan 2.2/LTX models) when configured and no KIE key; cloud otherwise.' },
       },
     },
   },
@@ -833,15 +944,16 @@ const HANDLERS = {
         'keou_generate_image', 'keou_polish_image', 'keou_remix_image', 'keou_adapt_image',
         'keou_upscale_image', 'keou_get_status', 'keou_welcome',
       ] : []),
+      ...((CFG.kieKey || CFG.comfyUrl) ? ['keou_generate_video'] : []),
       ...(CFG.kieKey ? [
-        'keou_generate_video', 'keou_upscale_video', 'keou_text_to_speech', 'keou_generate_sfx',
+        'keou_upscale_video', 'keou_text_to_speech', 'keou_generate_sfx',
       ] : []),
       ...(CFG.keouKey ? ['keou_pack_variants', 'keou_pack_status', 'keou_brand_kit_apply'] : []),
     ],
     suggestion: !CFG.kieKey && !CFG.comfyUrl
       ? `Nothing configured. Two options: (a) free & local — install ComfyUI and set COMFYUI_URL; (b) cloud — run keou_setup or sign up at ${SIGNUP_KIE}.`
       : !CFG.kieKey
-      ? `Local engine active (free images). For video, voice and SFX, add a KIE.AI key: ${SIGNUP_KIE}.`
+      ? `Local engine active (free images — and free video if your ComfyUI has the Wan 2.2 or LTX models). For voice and SFX, add a KIE.AI key: ${SIGNUP_KIE}.`
       : !CFG.keouKey
       ? `Tip: a free Keou Studio account adds batch packs and brand kit → ${SIGNUP_KEOU}`
       : 'All tiers unlocked.',
@@ -990,8 +1102,13 @@ const HANDLERS = {
     });
   },
 
-  keou_generate_video: async ({ prompt, sourceImageUrl, aspectRatio = '16:9', quality = 'fast' }) => {
-    if (!CFG.kieKey) throw new Error(`Video requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+  keou_generate_video: async ({ prompt, sourceImageUrl, aspectRatio = '16:9', quality = 'fast', engine }) => {
+    if (pickEngine(engine) === 'local') {
+      // Free local video on the user's ComfyUI (Wan 2.2 5B or LTX 2B,
+      // auto-detected). Without the models, the error lists what to install.
+      return comfyGenerateVideo({ prompt, imageUrl: sourceImageUrl, aspectRatio });
+    }
+    if (!CFG.kieKey) throw new Error(`Video needs a KIE.AI key (${SIGNUP_KIE}) — or install the Wan 2.2 / LTX models in your ComfyUI (COMFYUI_URL) for free local video.`);
     const model = quality === 'pro' ? KIE_DEFAULTS.videoPro : KIE_DEFAULTS.videoFast;
     return kieVeoSubmit({ prompt, model, aspectRatio, imageUrl: sourceImageUrl });
   },
@@ -1192,4 +1309,4 @@ if (CFG.kieKey) have.push('KIE');
 if (CFG.falKey) have.push('FAL');
 if (CFG.comfyUrl) have.push(`local ComfyUI (${CFG.comfyUrl})`);
 if (CFG.keouKey) have.push('Keou Studio');
-process.stderr.write(`[keou-mcp v0.9.0] connected — providers: ${have.join(', ') || 'none (run keou_setup, or set COMFYUI_URL for free local images)'}\n`);
+process.stderr.write(`[keou-mcp v0.10.0] connected — providers: ${have.join(', ') || 'none (run keou_setup, or set COMFYUI_URL for free local images)'}\n`);

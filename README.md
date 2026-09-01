@@ -14,11 +14,12 @@ You ──► Claude ──► keou-mcp ──► KIE.AI / FAL.AI ──► desi
                        └──────► your own ComfyUI ──► the same, FREE and fully local
 ```
 
-**New in 0.9: a local engine.** Point the MCP at your own [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
+**New in 0.10: fully local images AND video.** Point the MCP at your own [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
 (`COMFYUI_URL`) and image generation, polish, remix, adapt and upscaling run on
-**your hardware — no API key, no per-image cost, nothing leaves your machine.**
-It activates automatically when no KIE key is configured. Video, voice and SFX
-still need a cloud key.
+**your hardware — no API key, no cost, nothing leaves your machine.** Install
+the [Wan 2.2 5B](https://docs.comfy.org/tutorials/video/wan/wan2_2) or LTX-Video
+models and **video generates locally too** (auto-detected). It all activates
+automatically when no KIE key is configured. Voice and SFX still need a cloud key.
 
 > Built alongside [Keou Studio](https://studio.kanaky.xyz) — the open-source studio that turns one product photo into a finished campaign. The studio is MIT: [github.com/kanakytech/keou](https://github.com/kanakytech/keou). Nothing here is behind a paid tier; the pack and brand-kit tools use a **free** Keou Studio account because the source generation has to live somewhere.
 
