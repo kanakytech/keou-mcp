@@ -5,6 +5,25 @@ All notable changes to keou-mcp documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.9.0 — 2026-09-01
+
+### Added
+- **Local engine (ComfyUI)** — set `COMFYUI_URL` and image generation, polish,
+  remix, adapt and upscaling run free on your own hardware, no API key. Used
+  automatically when no KIE key is configured; force per-call with
+  `engine: "local"` or globally with `KEOU_ENGINE=local`. Auto-detects
+  installed checkpoints and upscale models (`LOCAL_CHECKPOINT` to pin).
+- `keou_get_status` accepts `provider: "local"` and renders local results
+  inline, same as cloud.
+- `keou_status_keys` reports the local engine state; startup banner lists it.
+- End-to-end test against a stub ComfyUI: `node scripts/test-local-engine.mjs`
+  (real MCP over stdio, no key, no real ComfyUI needed).
+
+### Notes
+- Video, voice and SFX still require a KIE.AI key — local video workflows
+  depend too heavily on installed nodes to promise blindly.
+
+
 ## [0.8.1] — 2026-08-24
 
 ### Changed — le palier payant n'existe plus
@@ -24,7 +43,6 @@ Keou Studio est passé entièrement open source sous MIT et sa licence à
   alias : les installations existantes continuent de fonctionner.
 - Le compte Keou Studio requis pour les packs et le brand kit est **gratuit**.
   Il sert à ranger la génération source, pas à débloquer une fonctionnalité.
-
 ## [0.7.0] — 2026-05-10
 
 ### Added

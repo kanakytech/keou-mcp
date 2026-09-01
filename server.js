@@ -45,6 +45,12 @@ function loadConfig() {
     falKey:  process.env.FAL_API_KEY  || fileCfg.falKey  || null,
     keouKey: process.env.KEOU_API_KEY || fileCfg.keouKey || null,
     keouUrl: (process.env.KEOU_API_URL || fileCfg.keouUrl || 'https://studio.kanaky.xyz').replace(/\/$/, ''),
+    // Local engine — a ComfyUI instance this machine can reach. When set,
+    // image tools can run entirely locally: no API key, no per-image cost.
+    comfyUrl: (process.env.COMFYUI_URL || process.env.LOCAL_ENGINE_URL || fileCfg.comfyUrl || '').replace(/\/$/, '') || null,
+    // 'auto' (default): local when a ComfyUI is configured and no KIE key is
+    // set — the zero-config free path. 'local' / 'cloud' force one side.
+    engine: process.env.KEOU_ENGINE || fileCfg.engine || 'auto',
   };
 }
 let CFG = loadConfig();
@@ -180,6 +186,166 @@ async function buildResultContent(status, { headerText } = {}) {
   blocks.push({ type: 'text', text: '```json\n' + JSON.stringify(meta, null, 2) + '\n```' });
 
   return { content: blocks, _meta: { inlined: inlinedCount, totalUrls: urls.length } };
+}
+
+// ─── KIE.AI provider ────────────────────────────────────────────────────────
+// ─── Local engine — ComfyUI ─────────────────────────────────────────────────
+// Talks to a ComfyUI instance over its native API: POST /prompt to submit a
+// graph, GET /history/{id} to poll, GET /view to fetch the image. No API key —
+// the "provider" is the user's own machine, so generation is free. Scope:
+// images and upscaling. Video/voice/SFX stay on the cloud providers — local
+// video workflows depend too heavily on which nodes are installed to promise
+// blindly.
+
+function comfyBase() {
+  if (!CFG.comfyUrl) {
+    throw new Error(
+      'Local engine not configured — set COMFYUI_URL (e.g. http://localhost:8188) in your .mcp.json env block. ' +
+      'ComfyUI install: https://github.com/comfyanonymous/ComfyUI (Apple Silicon works natively).'
+    );
+  }
+  return CFG.comfyUrl;
+}
+
+/** Which engine should an image tool use? Explicit request wins; otherwise
+ *  'auto' goes local exactly when a ComfyUI is configured and no KIE key is —
+ *  the free zero-config path for people who install neither account nor key. */
+function pickEngine(explicit) {
+  if (explicit === 'local') { comfyBase(); return 'local'; }
+  if (explicit === 'cloud') return 'cloud';
+  if (CFG.engine === 'local' && CFG.comfyUrl) return 'local';
+  if (CFG.engine === 'cloud') return 'cloud';
+  return (CFG.comfyUrl && !CFG.kieKey) ? 'local' : 'cloud';
+}
+
+async function comfyJson(path, opts = {}) {
+  const res = await fetch(`${comfyBase()}${path}`, opts);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`ComfyUI ${res.status} on ${path}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+// Never guess a model name — /object_info lists what this instance actually
+// has installed. Cached 60 s.
+const comfyModels = { ckpt: { v: null, exp: 0 }, upscale: { v: null, exp: 0 } };
+async function comfyFirstChoice(nodeType, inputName, cacheKey) {
+  const now = Date.now();
+  const c = comfyModels[cacheKey];
+  if (c.v && now < c.exp) return c.v;
+  const info = await comfyJson(`/object_info/${nodeType}`);
+  const choices = info?.[nodeType]?.input?.required?.[inputName]?.[0];
+  if (!Array.isArray(choices) || choices.length === 0) {
+    throw new Error(`ComfyUI has no ${nodeType} models installed — drop one into its models folder`);
+  }
+  const preferred = process.env.LOCAL_CHECKPOINT;
+  const picked = (cacheKey === 'ckpt' && preferred && choices.includes(preferred)) ? preferred : choices[0];
+  comfyModels[cacheKey] = { v: picked, exp: now + 60_000 };
+  return picked;
+}
+
+// FLUX schnell runs at 4 steps / CFG 1; FLUX dev ~20 / CFG 1; SD/SDXL want a
+// real CFG. The checkpoint filename is the only reliable hint we have.
+function comfySampler(ckpt) {
+  const n = ckpt.toLowerCase();
+  if (n.includes('schnell') || n.includes('turbo') || n.includes('lightning')) return { steps: 4, cfg: 1 };
+  if (n.includes('flux')) return { steps: 20, cfg: 1 };
+  return { steps: 25, cfg: 6.5 };
+}
+
+// ~1 megapixel in multiples of 64 — the comfort zone of SDXL/FLUX.
+const COMFY_DIMS = {
+  '1:1': [1024, 1024], '3:4': [896, 1152], '4:3': [1152, 896],
+  '9:16': [768, 1344], '16:9': [1344, 768], '21:9': [1536, 640],
+};
+
+// ComfyUI's LoadImage node only reads its own input/ folder — any source
+// image must go through /upload/image first.
+async function comfyUpload(imageUrl) {
+  const src = await fetch(imageUrl);
+  if (!src.ok) throw new Error(`Cannot fetch source image (${src.status})`);
+  const blob = await src.blob();
+  const form = new FormData();
+  form.append('image', blob, `keou-mcp-${Date.now()}.png`);
+  form.append('overwrite', 'true');
+  const res = await fetch(`${comfyBase()}/upload/image`, { method: 'POST', body: form });
+  if (!res.ok) throw new Error(`ComfyUI upload failed (${res.status})`);
+  const data = await res.json();
+  if (!data.name) throw new Error('ComfyUI upload returned no filename');
+  return data.name;
+}
+
+async function comfySubmit(graph) {
+  const data = await comfyJson('/prompt', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt: graph, client_id: 'keou-mcp' }),
+  });
+  if (!data.prompt_id) {
+    const detail = data.node_errors ? JSON.stringify(data.node_errors).slice(0, 200) : 'no prompt_id returned';
+    throw new Error(`ComfyUI rejected the workflow: ${detail}`);
+  }
+  return { provider: 'local', taskId: data.prompt_id };
+}
+
+async function comfyImageGraph({ prompt, sourceImageUrl, aspectRatio = '1:1', denoise = 1 }) {
+  const ckpt = await comfyFirstChoice('CheckpointLoaderSimple', 'ckpt_name', 'ckpt');
+  const { steps, cfg } = comfySampler(ckpt);
+  const [width, height] = COMFY_DIMS[aspectRatio] || COMFY_DIMS['1:1'];
+  const seed = Math.floor(Math.random() * 1e15);
+  const g = {
+    1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
+    2: { class_type: 'CLIPTextEncode', inputs: { text: prompt || '', clip: ['1', 1] } },
+    3: { class_type: 'CLIPTextEncode', inputs: { text: 'blurry, low quality, watermark, text artifacts', clip: ['1', 1] } },
+    5: { class_type: 'KSampler', inputs: { model: ['1', 0], positive: ['2', 0], negative: ['3', 0], seed, steps, cfg, sampler_name: 'euler', scheduler: 'normal', denoise, latent_image: null } },
+    6: { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
+    7: { class_type: 'SaveImage', inputs: { images: ['6', 0], filename_prefix: 'keou' } },
+  };
+  if (sourceImageUrl) {
+    const uploaded = await comfyUpload(sourceImageUrl);
+    g[8] = { class_type: 'LoadImage', inputs: { image: uploaded } };
+    g[9] = { class_type: 'ImageScale', inputs: { image: ['8', 0], upscale_method: 'lanczos', width, height, crop: 'center' } };
+    g[10] = { class_type: 'VAEEncode', inputs: { pixels: ['9', 0], vae: ['1', 2] } };
+    g[5].inputs.latent_image = ['10', 0];
+  } else {
+    g[4] = { class_type: 'EmptyLatentImage', inputs: { width, height, batch_size: 1 } };
+    g[5].inputs.latent_image = ['4', 0];
+    g[5].inputs.denoise = 1;
+  }
+  return comfySubmit(g);
+}
+
+async function comfyUpscaleImage({ imageUrl }) {
+  const model = await comfyFirstChoice('UpscaleModelLoader', 'model_name', 'upscale');
+  const uploaded = await comfyUpload(imageUrl);
+  return comfySubmit({
+    1: { class_type: 'LoadImage', inputs: { image: uploaded } },
+    2: { class_type: 'UpscaleModelLoader', inputs: { model_name: model } },
+    3: { class_type: 'ImageUpscaleWithModel', inputs: { upscale_model: ['2', 0], image: ['1', 0] } },
+    4: { class_type: 'SaveImage', inputs: { images: ['3', 0], filename_prefix: 'keou-upscale' } },
+  });
+}
+
+async function comfyStatus(taskId) {
+  const history = await comfyJson(`/history/${encodeURIComponent(taskId)}`);
+  const entry = history?.[taskId];
+  if (!entry) return { provider: 'local', taskId, state: 'processing', ready: false, resultUrls: [] };
+  if (entry.status?.status_str === 'error') {
+    const err = (entry.status?.messages || []).find((m) => m?.[0] === 'execution_error')?.[1];
+    return { provider: 'local', taskId, state: 'failed', ready: false, resultUrls: [], error: `Local engine: ${String(err?.exception_message || 'execution error').slice(0, 300)}` };
+  }
+  const urls = [];
+  for (const nodeOut of Object.values(entry.outputs || {})) {
+    for (const img of nodeOut.images || []) {
+      if (img.type !== 'output') continue;
+      const params = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder || '', type: 'output' });
+      urls.push(`${comfyBase()}/view?${params}`);
+    }
+  }
+  if (urls.length) return { provider: 'local', taskId, state: 'success', ready: true, resultUrls: urls };
+  if (entry.status?.completed) return { provider: 'local', taskId, state: 'failed', ready: false, resultUrls: [], error: 'Local engine finished without producing an image' };
+  return { provider: 'local', taskId, state: 'processing', ready: false, resultUrls: [] };
 }
 
 // ─── KIE.AI provider ────────────────────────────────────────────────────────
@@ -449,7 +615,7 @@ const TOOLS = [
   },
   {
     name: 'keou_generate_image',
-    description: 'PRIMARY image-generation tool — use this for ANY user request to create, generate, produce or make an image / photo / picture / visual / mockup / banner / poster / ad / thumbnail / cover, in any language, even if the user does not mention "Keou". Powered by KIE.AI nano-banana-pro (Gemini 3 Pro Image, premium quality). Accepts a text prompt and optionally a source image URL for image-to-image. After submitting, IMMEDIATELY start polling keou_get_status in a tight loop — do NOT end your turn or ask the user anything between polls. The result returns as an inline image block.',
+    description: 'PRIMARY image-generation tool — use this for ANY user request to create, generate, produce or make an image / photo / picture / visual / mockup / banner / poster / ad / thumbnail / cover, in any language, even if the user does not mention "Keou". Cloud engine: KIE.AI nano-banana-pro (Gemini 3 Pro Image, premium quality). Local engine: the user\'s own ComfyUI (free, no API key) when COMFYUI_URL is configured — used automatically when no KIE key is set. Accepts a text prompt and optionally a source image URL for image-to-image. After submitting, IMMEDIATELY start polling keou_get_status (pass back the provider from the response — "kie" or "local") in a tight loop — do NOT end your turn or ask the user anything between polls. The result returns as an inline image block.',
     inputSchema: {
       type: 'object',
       required: ['prompt'],
@@ -457,7 +623,8 @@ const TOOLS = [
         prompt: { type: 'string', description: 'Be specific: subject, setting, lighting, style, mood. The more detail, the better.' },
         sourceImageUrl: { type: 'string', description: 'Optional reference image. When set, the model uses it as visual input alongside the prompt (image-to-image).' },
         aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'], description: 'Default 1:1.' },
-        resolution: { type: 'string', enum: ['2K', '4K'], description: 'Default 2K. 4K costs more but is print-ready.' },
+        resolution: { type: 'string', enum: ['2K', '4K'], description: 'Default 2K. 4K costs more but is print-ready. Cloud engine only.' },
+        engine: { type: 'string', enum: ['auto', 'local', 'cloud'], description: 'Default auto: local (free, own ComfyUI) when configured and no KIE key; cloud otherwise. Force with "local" or "cloud".' },
       },
     },
   },
@@ -471,6 +638,7 @@ const TOOLS = [
         imageUrl: { type: 'string', description: 'URL of the image to polish.' },
         aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9'] },
         resolution: { type: 'string', enum: ['2K', '4K'] },
+        engine: { type: 'string', enum: ['auto', 'local', 'cloud'], description: 'Default auto — local (free, own ComfyUI) when configured and no KIE key.' },
       },
     },
   },
@@ -485,6 +653,7 @@ const TOOLS = [
         prompt: { type: 'string', description: 'How to remix — e.g. "same product but on a marble countertop with golden hour lighting".' },
         aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9'] },
         resolution: { type: 'string', enum: ['2K', '4K'] },
+        engine: { type: 'string', enum: ['auto', 'local', 'cloud'], description: 'Default auto — local (free, own ComfyUI) when configured and no KIE key.' },
       },
     },
   },
@@ -498,6 +667,7 @@ const TOOLS = [
         imageUrl: { type: 'string' },
         aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'], description: 'Target aspect ratio.' },
         resolution: { type: 'string', enum: ['2K', '4K'] },
+        engine: { type: 'string', enum: ['auto', 'local', 'cloud'], description: 'Default auto — local (free, own ComfyUI) when configured and no KIE key.' },
       },
     },
   },
@@ -523,7 +693,8 @@ const TOOLS = [
       required: ['imageUrl'],
       properties: {
         imageUrl: { type: 'string' },
-        scale: { type: 'integer', enum: [2, 4], description: 'Default 2x.' },
+        scale: { type: 'integer', enum: [2, 4], description: 'Default 2x. Cloud engine only — the local engine uses the installed model\'s factor (usually 4x).' },
+        engine: { type: 'string', enum: ['auto', 'local', 'cloud'], description: 'Default auto — local (free, own ComfyUI) when configured and no KIE key.' },
       },
     },
   },
@@ -569,7 +740,7 @@ const TOOLS = [
   },
   {
     name: 'keou_get_status',
-    description: 'Poll a generation task. Call this in a TIGHT LOOP immediately after any submit (keou_generate_image, _video, _text_to_speech, _generate_sfx, _polish_image, _remix_image, _adapt_image, _upscale_image, _upscale_video). Do NOT end your assistant turn between polls, do NOT ask the user "should I keep polling?" — just keep calling until state==="success" (returns inline content) or "failed" (returns error). Typical timing: image 30–90s, video 1–3min, audio 5–20s. Pass back the EXACT taskId and provider from the submit response. For FAL also pass the same model string.',
+    description: 'Poll a generation task. Call this in a TIGHT LOOP immediately after any submit (keou_generate_image, _video, _text_to_speech, _generate_sfx, _polish_image, _remix_image, _adapt_image, _upscale_image, _upscale_video). Do NOT end your assistant turn between polls, do NOT ask the user "should I keep polling?" — just keep calling until state==="success" (returns inline content) or "failed" (returns error). Typical timing: image 30–90s, video 1–3min, audio 5–20s. Pass back the EXACT taskId and provider from the submit response (\"kie\", \"kie-veo\", \"fal\" or \"local\"). For FAL also pass the same model string.',
     inputSchema: {
       type: 'object',
       required: ['taskId', 'provider'],
@@ -653,17 +824,24 @@ const HANDLERS = {
   keou_status_keys: async () => ({
     kie:  CFG.kieKey  ? `configured (${CFG.kieKey.slice(0, 6)}…)` : 'not set',
     fal:  CFG.falKey  ? `configured (${CFG.falKey.slice(0, 6)}…)` : 'not set',
-    keouPro: CFG.keouKey ? `configured (${CFG.keouKey.slice(0, 10)}…)` : 'not set — premium tools locked',
+    localEngine: CFG.comfyUrl
+      ? `configured (${CFG.comfyUrl}) — image tools run FREE on this ComfyUI${!CFG.kieKey ? ' (active: no KIE key set)' : CFG.engine === 'local' ? ' (forced by KEOU_ENGINE=local)' : ' (pass engine:"local" to use it)'}`
+      : 'not set — set COMFYUI_URL to generate images free on your own ComfyUI',
+    keouStudio: CFG.keouKey ? `configured (${CFG.keouKey.slice(0, 10)}…)` : 'not set — pack/brand-kit tools need a free Keou Studio account',
     unlockedTools: [
-      ...(CFG.kieKey ? [
+      ...((CFG.kieKey || CFG.comfyUrl) ? [
         'keou_generate_image', 'keou_polish_image', 'keou_remix_image', 'keou_adapt_image',
-        'keou_generate_video', 'keou_upscale_image', 'keou_upscale_video',
-        'keou_text_to_speech', 'keou_generate_sfx', 'keou_get_status', 'keou_welcome',
+        'keou_upscale_image', 'keou_get_status', 'keou_welcome',
+      ] : []),
+      ...(CFG.kieKey ? [
+        'keou_generate_video', 'keou_upscale_video', 'keou_text_to_speech', 'keou_generate_sfx',
       ] : []),
       ...(CFG.keouKey ? ['keou_pack_variants', 'keou_pack_status', 'keou_brand_kit_apply'] : []),
     ],
-    suggestion: !CFG.kieKey
-      ? `No KIE.AI key set. Run keou_setup, or sign up at ${SIGNUP_KIE}.`
+    suggestion: !CFG.kieKey && !CFG.comfyUrl
+      ? `Nothing configured. Two options: (a) free & local — install ComfyUI and set COMFYUI_URL; (b) cloud — run keou_setup or sign up at ${SIGNUP_KIE}.`
+      : !CFG.kieKey
+      ? `Local engine active (free images). For video, voice and SFX, add a KIE.AI key: ${SIGNUP_KIE}.`
       : !CFG.keouKey
       ? `Tip: a free Keou Studio account adds batch packs and brand kit → ${SIGNUP_KEOU}`
       : 'All tiers unlocked.',
@@ -724,6 +902,7 @@ const HANDLERS = {
       { name: 'Resolution: 2K vs 4K', detail: '2K is the default — fast, cheap, looks great on screen. 4K costs more but is print-ready. Use 4K only when needed.' },
       { name: 'Aspect ratios', detail: '1:1 (IG square), 9:16 (Stories / Reels / TikTok), 16:9 (banners / video), 4:3 / 3:4 (classic photo). Adapt is the fastest way to make all formats from one source.' },
       { name: 'Async by design', detail: 'Generation takes 10–60 seconds. Every tool returns a taskId — call keou_get_status with the same provider/taskId to retrieve. The assistant should poll automatically.' },
+      { name: 'Local engine (free)', detail: 'With COMFYUI_URL set, image tools run on the user\'s own ComfyUI — no API key, no per-image cost. Used automatically when no KIE key is configured; force with engine:"local". Video, voice and SFX still need a KIE.AI key.' },
       { name: 'Inline rendering', detail: 'When ready, images and audio render directly in this chat — no clicking links. Videos render as a clickable URL (MCP has no native video block yet).' },
     ],
 
@@ -757,30 +936,48 @@ const HANDLERS = {
     assistantInstructions: 'IMPORTANT — be like a great Apple Genius bar employee, not a bot. Don\'t dump this whole guide on the user. Ask them what they\'re trying to make (a product photo? an ad? a voice-over for a reel?) and pick ONE matching example to run together. Walk them through it, show the output inline, then ask what\'s next. Patience over thoroughness.',
   }),
 
-  keou_generate_image: async ({ prompt, sourceImageUrl, aspectRatio = '1:1', resolution = '2K' }) => {
-    if (!CFG.kieKey) throw new Error(`Image generation requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+  keou_generate_image: async ({ prompt, sourceImageUrl, aspectRatio = '1:1', resolution = '2K', engine }) => {
+    if (pickEngine(engine) === 'local') {
+      // Free path: the user's own ComfyUI. With a reference image we stay
+      // close to the original pixels (denoise 0.45) — the local approximation
+      // of the cloud models' pixel-locked product fidelity.
+      return comfyImageGraph({ prompt, sourceImageUrl, aspectRatio, denoise: sourceImageUrl ? 0.45 : 1 });
+    }
+    if (!CFG.kieKey) throw new Error(`Image generation needs a KIE.AI key (${SIGNUP_KIE}) — or set COMFYUI_URL to generate free on your own ComfyUI.`);
     const sourceImageUrls = sourceImageUrl ? [sourceImageUrl] : [];
     return kieGenerateImage({ prompt, sourceImageUrls, aspectRatio, resolution });
   },
 
-  keou_polish_image: async ({ imageUrl, aspectRatio = '1:1', resolution = '2K' }) => {
-    if (!CFG.kieKey) throw new Error(`Polish requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+  keou_polish_image: async ({ imageUrl, aspectRatio = '1:1', resolution = '2K', engine }) => {
     if (!imageUrl) throw new Error('imageUrl required');
     const polishPrompt = 'Clean up imperfections, enhance lighting, sharpen detail, balance colors, remove distracting background noise. Keep subject and composition exactly as-is.';
+    if (pickEngine(engine) === 'local') {
+      return comfyImageGraph({ prompt: polishPrompt, sourceImageUrl: imageUrl, aspectRatio, denoise: 0.3 });
+    }
+    if (!CFG.kieKey) throw new Error(`Polish needs a KIE.AI key (${SIGNUP_KIE}) — or set COMFYUI_URL to run it free on your own ComfyUI.`);
     return kieEditImage({ prompt: polishPrompt, imageUrl, aspectRatio, resolution });
   },
 
-  keou_remix_image: async ({ imageUrl, prompt, aspectRatio = '1:1', resolution = '2K' }) => {
-    if (!CFG.kieKey) throw new Error(`Remix requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+  keou_remix_image: async ({ imageUrl, prompt, aspectRatio = '1:1', resolution = '2K', engine }) => {
     if (!imageUrl) throw new Error('imageUrl required');
     if (!prompt?.trim()) throw new Error('prompt required — describe how to remix the image');
+    if (pickEngine(engine) === 'local') {
+      return comfyImageGraph({ prompt, sourceImageUrl: imageUrl, aspectRatio, denoise: 0.65 });
+    }
+    if (!CFG.kieKey) throw new Error(`Remix needs a KIE.AI key (${SIGNUP_KIE}) — or set COMFYUI_URL to run it free on your own ComfyUI.`);
     return kieEditImage({ prompt, imageUrl, aspectRatio, resolution });
   },
 
-  keou_adapt_image: async ({ imageUrl, aspectRatio, resolution = '2K' }) => {
-    if (!CFG.kieKey) throw new Error(`Adapt requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+  keou_adapt_image: async ({ imageUrl, aspectRatio, resolution = '2K', engine }) => {
     if (!imageUrl) throw new Error('imageUrl required');
     if (!aspectRatio) throw new Error('aspectRatio required (e.g. "9:16")');
+    if (pickEngine(engine) === 'local') {
+      return comfyImageGraph({
+        prompt: 'same scene recomposed for the new framing, keep subject and lighting',
+        sourceImageUrl: imageUrl, aspectRatio, denoise: 0.5,
+      });
+    }
+    if (!CFG.kieKey) throw new Error(`Adapt needs a KIE.AI key (${SIGNUP_KIE}) — or set COMFYUI_URL to run it free on your own ComfyUI.`);
     // Adapt = re-render the same subject in a new aspect ratio. Uses
     // nano-banana-pro with image_input + a minimal prompt asking it to keep
     // composition while reframing.
@@ -799,9 +996,14 @@ const HANDLERS = {
     return kieVeoSubmit({ prompt, model, aspectRatio, imageUrl: sourceImageUrl });
   },
 
-  keou_upscale_image: async ({ imageUrl, scale = 2 }) => {
-    if (!CFG.kieKey) throw new Error(`Upscale requires KIE.AI key — sign up at ${SIGNUP_KIE}`);
+  keou_upscale_image: async ({ imageUrl, scale = 2, engine }) => {
     if (!imageUrl) throw new Error('imageUrl required');
+    if (pickEngine(engine) === 'local') {
+      // The factor is the installed model's (RealESRGAN x4 → ×4): ComfyUI's
+      // ImageUpscaleWithModel node has no adjustable factor.
+      return comfyUpscaleImage({ imageUrl });
+    }
+    if (!CFG.kieKey) throw new Error(`Upscale needs a KIE.AI key (${SIGNUP_KIE}) — or set COMFYUI_URL to run it free on your own ComfyUI.`);
     return kieUpscaleImage({ imageUrl, upscaleFactor: scale });
   },
 
@@ -827,11 +1029,12 @@ const HANDLERS = {
     let status;
     if (provider === 'kie') status = await kieStatus(taskId);
     else if (provider === 'kie-veo') status = await kieVeoStatus(taskId);
+    else if (provider === 'local') status = await comfyStatus(taskId);
     else if (provider === 'fal') {
       if (!model) throw new Error('FAL provider requires the same `model` you used at submit (e.g. fal-ai/clarity-upscaler).');
       status = await falStatus(model, taskId);
     } else {
-      throw new Error('provider must be "kie", "kie-veo", or "fal"');
+      throw new Error('provider must be "kie", "kie-veo", "fal", or "local"');
     }
 
     // Still in flight or failed → return JSON status as text. Claude polls
@@ -987,5 +1190,6 @@ await server.connect(transport);
 const have = [];
 if (CFG.kieKey) have.push('KIE');
 if (CFG.falKey) have.push('FAL');
+if (CFG.comfyUrl) have.push(`local ComfyUI (${CFG.comfyUrl})`);
 if (CFG.keouKey) have.push('Keou Studio');
-process.stderr.write(`[keou-mcp v0.7.0] connected — providers: ${have.join(', ') || 'none (run keou_setup)'}\n`);
+process.stderr.write(`[keou-mcp v0.9.0] connected — providers: ${have.join(', ') || 'none (run keou_setup, or set COMFYUI_URL for free local images)'}\n`);

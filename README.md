@@ -11,7 +11,14 @@ A Model Context Protocol server that turns Claude (Code, Desktop, Cursor) into a
 
 ```
 You ──► Claude ──► keou-mcp ──► KIE.AI / FAL.AI ──► design-system-aware visual assets
+                       └──────► your own ComfyUI ──► the same, FREE and fully local
 ```
+
+**New in 0.9: a local engine.** Point the MCP at your own [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
+(`COMFYUI_URL`) and image generation, polish, remix, adapt and upscaling run on
+**your hardware — no API key, no per-image cost, nothing leaves your machine.**
+It activates automatically when no KIE key is configured. Video, voice and SFX
+still need a cloud key.
 
 > Built alongside [Keou Studio](https://studio.kanaky.xyz) — the open-source studio that turns one product photo into a finished campaign. The studio is MIT: [github.com/kanakytech/keou](https://github.com/kanakytech/keou). Nothing here is behind a paid tier; the pack and brand-kit tools use a **free** Keou Studio account because the source generation has to live somewhere.
 
@@ -28,6 +35,23 @@ You ──► Claude ──► keou-mcp ──► KIE.AI / FAL.AI ──► desi
 | *"Generate a 9:16 vertical video with a slow zoom"* | KIE.AI Veo 3.1 image-to-video |
 
 Sixteen tools. Smart routing. BYOK (bring your own key) — no Keou account needed for the basics.
+Or no key at all: with a local ComfyUI, images are free.
+
+## Free local mode (no API key)
+
+Have [ComfyUI](https://github.com/comfyanonymous/ComfyUI) running? (Apple Silicon
+works natively — a 16 GB M3 renders SDXL in ~1-3 min.) Then:
+
+```bash
+claude mcp add keou --scope user -e COMFYUI_URL=http://localhost:8188 -- npx -y github:kanakytech/keou-mcp
+```
+
+That's the whole setup. Ask Claude for a product image and it renders on your
+GPU, free. The MCP auto-detects your installed checkpoints (pin one with
+`LOCAL_CHECKPOINT`). With both a ComfyUI **and** a KIE key configured, cloud
+engines are the default for quality — say "use the local engine" (or pass
+`engine: "local"`) to force free local rendering, or set `KEOU_ENGINE=local`
+to make local the default.
 
 ---
 
